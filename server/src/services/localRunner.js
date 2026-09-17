@@ -166,4 +166,15 @@ async function runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb }) {
   }
 }
 
-module.exports = { runLocal, STATUS, runtimeFor };
+let runtimesCache = null;
+function availableRuntimes() {
+  if (runtimesCache) return runtimesCache;
+  runtimesCache = {
+    python: Boolean(runtimeFor("python")),
+    javascript: Boolean(runtimeFor("javascript")),
+    java: Boolean(runtimeFor("java")),
+  };
+  return runtimesCache;
+}
+
+module.exports = { runLocal, STATUS, runtimeFor, availableRuntimes };
