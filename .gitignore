@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+desktop/dist/
+desktop/dist-electron/
+server/dist/
+dist/
+
+# Electron / packaging
+*.log
+npm-debug.log*
+.DS_Store
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# Test / coverage
+coverage/
+
+# OS
+Thumbs.db
