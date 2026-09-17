@@ -17,6 +17,12 @@ export default function AdminDashboard() {
   const [newBatchName, setNewBatchName] = useState("");
   const [loading, setLoading] = useState(false);
   const [showAddStudent, setShowAddStudent] = useState(false);
+  const [reschedule, setReschedule] = useState(null);
+  const [rescheduleForm, setRescheduleForm] = useState({
+    availableFrom: "",
+    availableUntil: "",
+    durationMinutes: 60,
+  });
   const [newStudent, setNewStudent] = useState({
     firstName: "",
     lastName: "",
@@ -148,6 +154,42 @@ export default function AdminDashboard() {
     });
   }
 
+  function toLocalInput(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function openReschedule(t) {
+    setReschedule(t);
+    setRescheduleForm({
+      availableFrom: toLocalInput(t.available_from),
+      availableUntil: toLocalInput(t.available_until),
+      durationMinutes: t.duration_minutes,
+    });
+  }
+
+  async function saveReschedule() {
+    if (!rescheduleForm.availableFrom || !rescheduleForm.availableUntil) {
+      return toast.error("Set both start and end date/time");
+    }
+    if (new Date(rescheduleForm.availableUntil) <= new Date(rescheduleForm.availableFrom)) {
+      return toast.error("End time must be after start time");
+    }
+    setLoading(true);
+    try {
+      await api.patch(`/admin/tests/${reschedule.id}`, rescheduleForm);
+      toast.success("Test schedule updated");
+      setReschedule(null);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || "Failed to reschedule");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function testStatus(test) {
     const now = new Date();
     if (now < new Date(test.available_from)) return { label: "Scheduled", color: "#f59e0b" };
@@ -227,6 +269,7 @@ export default function AdminDashboard() {
                         <th>Test</th>
                         <th>Batch</th>
                         <th>Starts</th>
+                        <th>Ends</th>
                         <th>Duration</th>
                         <th>Questions</th>
                         <th>Status</th>
@@ -245,6 +288,7 @@ export default function AdminDashboard() {
                             </td>
                             <td>{t.batch_name || "—"}</td>
                             <td className="text-small">{formatDate(t.available_from)}</td>
+                            <td className="text-small">{formatDate(t.available_until)}</td>
                             <td>{t.duration_minutes}m</td>
                             <td>{t.question_count}</td>
                             <td>
@@ -272,6 +316,12 @@ export default function AdminDashboard() {
                                 onClick={() => navigate(`/admin/results/${t.id}`)}
                               >
                                 Results
+                              </button>{" "}
+                              <button
+                                className="btn btn-sm btn-secondary"
+                                onClick={() => openReschedule(t)}
+                              >
+                                Reschedule
                               </button>
                             </td>
                           </tr>
@@ -279,6 +329,69 @@ export default function AdminDashboard() {
                       })}
                     </tbody>
                   </table>
+                </div>
+              )}
+
+              {reschedule && (
+                <div className="card mb-16" style={{ marginTop: 16, border: "1px solid #c7d2fe" }}>
+                  <div className="flex-between mb-16">
+                    <h3 style={{ fontSize: 16 }}>Reschedule — {reschedule.title}</h3>
+                    <button className="btn btn-sm btn-secondary" onClick={() => setReschedule(null)}>
+                      Cancel
+                    </button>
+                  </div>
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+                    <div>
+                      <label className="text-small text-muted">Opens at</label>
+                      <input
+                        className="input"
+                        type="datetime-local"
+                        value={rescheduleForm.availableFrom}
+                        onChange={(e) =>
+                          setRescheduleForm({ ...rescheduleForm, availableFrom: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="text-small text-muted">Closes at</label>
+                      <input
+                        className="input"
+                        type="datetime-local"
+                        value={rescheduleForm.availableUntil}
+                        onChange={(e) =>
+                          setRescheduleForm({ ...rescheduleForm, availableUntil: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="text-small text-muted">Duration (min)</label>
+                      <input
+                        className="input"
+                        type="number"
+                        min="1"
+                        max="1440"
+                        style={{ width: 120 }}
+                        value={rescheduleForm.durationMinutes}
+                        onChange={(e) =>
+                          setRescheduleForm({
+                            ...rescheduleForm,
+                            durationMinutes: Number(e.target.value),
+                          })
+                        }
+                      />
+                    </div>
+                    <button
+                      className="btn btn-primary"
+                      disabled={loading}
+                      onClick={saveReschedule}
+                    >
+                      {loading ? "Saving…" : "Save schedule"}
+                    </button>
+                  </div>
+                  <p className="text-small text-muted" style={{ marginTop: 10 }}>
+                    Students see the test only between "Opens at" and "Closes at". Existing
+                    submissions are unaffected.
+                  </p>
                 </div>
               )}
             </div>

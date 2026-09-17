@@ -120,6 +120,7 @@ router.get("/:id", requireAuth, requireAdmin, async (req, res) => {
     if (testRes.rows.length === 0)
       return res.status(404).json({ error: "Test not found" });
     const test = testRes.rows[0];
+    const key = test.encryption_key;
     delete test.encryption_key;
 
     const questionsRes = await pool.query(
@@ -132,7 +133,6 @@ router.get("/:id", requireAuth, requireAdmin, async (req, res) => {
     );
 
     // Decrypt question content for admin view
-    const key = testRes.rows[0].encryption_key;
     const questions = questionsRes.rows.map((q) => ({
       ...q,
       question_text: encryption.decrypt(q.question_text, key),
@@ -165,7 +165,11 @@ router.patch("/:id", requireAuth, requireAdmin, async (req, res) => {
     const params = [];
     if (title) { params.push(String(title).trim()); sets.push(`title = $${params.length}`); }
     if (description !== undefined) { params.push(description); sets.push(`description = $${params.length}`); }
-    if (availableFrom) { params.push(new Date(availableFrom)); sets.push(`available_from = $${params.length}`); }
+    if (availableFrom) {
+      const f = new Date(availableFrom);
+      if (Number.isNaN(f.getTime())) return res.status(400).json({ error: "Invalid availableFrom" });
+      params.push(f); sets.push(`available_from = $${params.length}`);
+    }
     if (availableUntil) {
       const u = new Date(availableUntil);
       if (Number.isNaN(u.getTime())) return res.status(400).json({ error: "Invalid availableUntil" });

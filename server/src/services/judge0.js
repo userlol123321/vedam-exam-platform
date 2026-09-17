@@ -21,6 +21,8 @@ const LANGUAGE_IDS = {
   javascript: { id: 63 },
 };
 
+const { runLocal } = require("./localRunner");
+
 const JUDGE0_MODE = process.env.JUDGE0_MODE || "CLOUD";
 const JUDGE0_BASE_URL = process.env.JUDGE0_BASE_URL || "http://localhost:2358";
 const JUDGE0_RAPID_API_KEY = process.env.JUDGE0_RAPID_API_KEY || "";
@@ -88,6 +90,12 @@ function unb64(b) {
 async function executeCode({ language, code, stdin, timeLimitMs, memoryLimitMb }) {
   const lang = LANGUAGE_IDS[language];
   if (!lang) throw new Error(`Unsupported language: ${language}`);
+
+  // Built-in judge: run code with local runtimes (no API key / Docker needed).
+  if (JUDGE0_MODE === "LOCAL") {
+    return runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
+  }
+
   const cfg = getJudge0Config();
 
   const body = {

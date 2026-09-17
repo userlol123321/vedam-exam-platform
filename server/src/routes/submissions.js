@@ -407,7 +407,14 @@ router.post("/tests/:id/submit", requireAuth, requireStudent, async (req, res) =
         gd.restriction_violation = graded.restrictionViolation || null;
         gd.details = code.slice(0, 500) || null;
 
-        totalMarks += graded.totalWeight;
+        // Scale the weighted result to the question's configured marks, so a
+        // fully-correct coding answer is worth `marks` regardless of weight sum.
+        const qMarks = Number(q.marks) || 0;
+        const totalW = graded.totalWeight || 0;
+        gd.earnedMarks = totalW > 0
+          ? Number(((graded.earnedMarks / totalW) * qMarks).toFixed(2))
+          : 0;
+        totalMarks += qMarks;
       }
 
       totalScore += Number(gd.earnedMarks);

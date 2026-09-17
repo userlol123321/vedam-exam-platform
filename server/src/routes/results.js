@@ -24,7 +24,7 @@ router.get("/:testId", requireAuth, requireAdmin, async (req, res) => {
         COALESCE(AVG(score), 0) AS avg_score,
         COALESCE(MAX(score), 0) AS max_score,
         COALESCE(MIN(score), 0) AS min_score,
-        COALESCE(SUM(CASE WHEN score >= (SELECT COALESCE(AVG(score2),1) FROM submissions score2 WHERE score2.test_id = s.test_id) THEN 1 ELSE 0 END), 0) AS above_avg
+        COALESCE(SUM(CASE WHEN score >= (SELECT COALESCE(AVG(score2.score),1) FROM submissions score2 WHERE score2.test_id = s.test_id) THEN 1 ELSE 0 END), 0) AS above_avg
        FROM submissions s WHERE s.test_id = $1 AND s.is_graded = TRUE`,
       [req.params.testId]
     );
