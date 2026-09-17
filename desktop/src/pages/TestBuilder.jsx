@@ -3,6 +3,12 @@ import { useParams, useNavigate, Link } from "react-router-dom";
 import { toast } from "react-hot-toast";
 import { api } from "../services/api";
 
+const CODING_LANGS = [
+  { value: "python", label: "Python" },
+  { value: "java", label: "Java" },
+  { value: "javascript", label: "JavaScript (Node)" },
+];
+
 export default function TestBuilder() {
   const { testId } = useParams();
   const navigate = useNavigate();
@@ -24,6 +30,7 @@ export default function TestBuilder() {
   const [loading, setLoading] = useState(false);
   const [showQuestion, setShowQuestion] = useState(false);
   const [questionType, setQuestionType] = useState("mcq");
+  const [langOptions, setLangOptions] = useState(CODING_LANGS);
 
   // MCQ draft
   const [mcqDraft, setMcqDraft] = useState({
@@ -53,7 +60,22 @@ export default function TestBuilder() {
   useEffect(() => {
     loadBatches();
     if (editing) loadTest();
+    fetchCodingRuntimes();
   }, []);
+
+  // Hide languages whose runtime isn't available on the connected server
+  // (e.g. Java when the server judge reports java:false). Falls back to
+  // showing all languages if /health can't be reached.
+  async function fetchCodingRuntimes() {
+    try {
+      const res = await api.get("/health", { timeout: 8000 });
+      const rt = res.data?.judge?.runtimes || {};
+      const available = CODING_LANGS.filter((l) => rt[l.value] !== false);
+      if (available.length > 0) setLangOptions(available);
+    } catch {
+      // keep default list
+    }
+  }
 
   async function loadBatches() {
     try {
@@ -474,10 +496,23 @@ export default function TestBuilder() {
                       value={codingDraft.language}
                       onChange={(e) => setCodingDraft({ ...codingDraft, language: e.target.value })}
                     >
-                      <option value="python">Python</option>
-                      <option value="java">Java</option>
-                      <option value="javascript">JavaScript (Node)</option>
+                      {langOptions.map((l) => (
+                        <option key={l.value} value={l.value}>{l.label}</option>
+                      ))}
+                      {!langOptions.some((l) => l.value === codingDraft.language) && (
+                        <option value={codingDraft.language}>
+                          {CODING_LANGS.find((l) => l.value === codingDraft.language)?.label ||
+                            codingDraft.language}{" "}
+                          (unavailable on server)
+                        </option>
+                      )}
                     </select>
+                    {!langOptions.some((l) => l.value === codingDraft.language) && (
+                      <p className="text-muted">
+                        The connected server cannot grade this language right now. Students
+                        will only see supported languages in their test.
+                      </p>
+                    )}
                   </div>
                   <div className="form-row">
                     <label className="label">Time limit (ms)</label>

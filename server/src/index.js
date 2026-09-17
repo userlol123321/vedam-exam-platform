@@ -5,7 +5,7 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 
 const { pool } = require("./config/database");
-const { availableRuntimes } = require("./services/localRunner");
+const { judgeStatus } = require("./services/judge0");
 const authRoutes = require("./routes/auth");
 const studentAdminRoutes = require("./routes/students");
 const testRoutes = require("./routes/tests");
@@ -50,12 +50,11 @@ app.get("/health", (req, res) =>
   res.json({
     status: "ok",
     time: new Date(),
-    judge: {
-      mode: process.env.JUDGE0_MODE || "CLOUD",
-      runtimes: availableRuntimes(),
-    },
+    judge: judgeStatus(),
   })
 );
+
+app.get("/health/judge", (req, res) => res.json(judgeStatus()));
 
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", studentAdminRoutes); // batches + students

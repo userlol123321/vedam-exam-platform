@@ -21,7 +21,8 @@ const LANGUAGE_IDS = {
   javascript: { id: 63 },
 };
 
-const { runLocal } = require("./localRunner");
+const { runLocal, runtimeFor } = require("./localRunner");
+const onlineRunner = require("./onlineRunner");
 
 const JUDGE0_MODE = process.env.JUDGE0_MODE || "CLOUD";
 const JUDGE0_BASE_URL = process.env.JUDGE0_BASE_URL || "http://localhost:2358";
@@ -86,6 +87,16 @@ function unb64(b) {
 
 /**
  * Execute a single program against one stdin input.
+ *
+ * Mode routing:
+ *  - LOCAL:  built-in localRunner only (no key/Docker needed)
+ *  - HYBRID: local runtime first, fall back to the online compiler for
+ *            languages without a local runtime (e.g. Java on Render native)
+ *  - ONLINE: route coding execution through onlinecompiler.io for every
+ *            supported language. Exception: JavaScript has no Node runtime on
+ *            onlinecompiler.io (only TypeScript/Deno), so Node runs locally —
+ *            it's just a child process of the server, zero extra footprint.
+ *  - SELF_HOSTED / CLOUD: Judge0-compatible API
  */
 async function executeCode({ language, code, stdin, timeLimitMs, memoryLimitMb }) {
   const lang = LANGUAGE_IDS[language];
@@ -94,6 +105,31 @@ async function executeCode({ language, code, stdin, timeLimitMs, memoryLimitMb }
   // Built-in judge: run code with local runtimes (no API key / Docker needed).
   if (JUDGE0_MODE === "LOCAL") {
     return runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
+  }
+
+  // Local-first, online fallback for languages missing a local runtime.
+  if (JUDGE0_MODE === "HYBRID") {
+    if (runtimeFor(language)) {
+      return runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
+    }
+    if (onlineRunner.supports(language)) {
+      return onlineRunner.runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb });
+    }
+    const err = new Error(
+      `No runtime available for '${language}' (local or online) on this server`
+    );
+    err.status = 200;
+    throw err;
+  }
+
+  // Everything through the online compiler.
+  if (JUDGE0_MODE === "ONLINE") {
+    // onlinecompiler.io has no Node runtime, so Node keeps running locally —
+    // it's just a child process of the server (zero extra footprint).
+    if (language === "javascript") {
+      return runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
+    }
+    return onlineRunner.runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb });
   }
 
   const cfg = getJudge0Config();
@@ -220,6 +256,43 @@ async function gradeCodingQuestion({
   return { earnedMarks, totalWeight, caseResults };
 }
 
+/**
+ * Mode-aware capability report for /health.
+ */
+function judgeStatus() {
+  const mode = JUDGE0_MODE;
+  const runtimes = { python: false, javascript: false, java: false };
+
+  for (const language of Object.keys(LANGUAGE_IDS)) {
+    if (mode === "LOCAL") {
+      runtimes[language] = Boolean(runtimeFor(language));
+    } else if (mode === "HYBRID") {
+      runtimes[language] = Boolean(runtimeFor(language)) ||
+        (onlineRunner.supports(language) && onlineRunner.configured());
+    } else if (mode === "ONLINE") {
+      // JavaScript always runs via local Node (onlinecompiler.io has none).
+      runtimes[language] = language === "javascript"
+        ? Boolean(runtimeFor(language))
+        : onlineRunner.supports(language) && onlineRunner.configured();
+    } else {
+      // SELF_HOSTED / CLOUD rely on the Judge0-compatible API
+      runtimes[language] = true;
+    }
+  }
+
+  const judge = { mode, runtimes };
+  if (mode === "HYBRID" || mode === "ONLINE") {
+    judge.online = {
+      provider: onlineRunner.providerName(),
+      configured: onlineRunner.configured(),
+      languages: Object.keys(LANGUAGE_IDS).filter(
+        (l) => onlineRunner.supports(l) && (mode === "ONLINE" || !runtimeFor(l))
+      ),
+    };
+  }
+  return judge;
+}
+
 module.exports = {
   JUDGE0_STATUS,
   LANGUAGE_IDS,
@@ -228,4 +301,5 @@ module.exports = {
   gradeCodingQuestion,
   normalizeOutput,
   outputsMatch,
+  judgeStatus,
 };

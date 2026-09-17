@@ -15,24 +15,71 @@ const STATUS = {
 const MAX_OUTPUT_BYTES = 1024 * 1024; // 1 MB stdout/stderr cap
 
 function which(cmd) {
+  // Absolute paths are checked directly; otherwise look on PATH.
+  if (cmd.includes(path.sep)) {
+    try {
+      fs.accessSync(cmd, fs.constants.X_OK);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
   const probe = spawnSync(process.platform === "win32" ? "where" : "which", [cmd], {
     stdio: "ignore",
   });
   return probe.status === 0;
 }
 
+// Locations to look for a JDK that isn't on the system PATH (e.g. one
+// downloaded into the project by the Render build step, or $JAVA_HOME).
+function javaBinDirs() {
+  const dirs = [];
+  if (process.env.JAVA_HOME) dirs.push(path.join(process.env.JAVA_HOME, "bin"));
+  dirs.push(path.join(process.cwd(), "jdk", "bin"));
+  dirs.push(path.join(__dirname, "..", "..", "jdk", "bin"));
+  return dirs;
+}
+
+function findExec(name, extraDirs = []) {
+  for (const dir of extraDirs) {
+    const candidate = path.join(dir, name);
+    if (which(candidate)) return candidate;
+  }
+  return which(name) ? name : null;
+}
+
+let javaRuntimeCache;
+function javaRuntime() {
+  if (javaRuntimeCache !== undefined) return javaRuntimeCache;
+  const dirs = javaBinDirs();
+  const java = findExec("java", dirs);
+  const javac = findExec("javac", dirs);
+  if (!java || !javac) {
+    javaRuntimeCache = null;
+    return null;
+  }
+  // macOS ships a /usr/bin/java stub that `which` resolves but that fails at
+  // runtime. Probe the JVM so HYBRID mode correctly falls back to the online
+  // runner instead of producing confusing local errors.
+  const probe = spawnSync(java, ["-version"], { stdio: "ignore" });
+  if (probe.status !== 0) {
+    javaRuntimeCache = null;
+    return null;
+  }
+  javaRuntimeCache = { cmd: java, compileCmd: javac, ext: "java", kind: "java" };
+  return javaRuntimeCache;
+}
+
 function runtimeFor(language) {
   if (language === "python") {
-    if (which("python3")) return { cmd: "python3", ext: "py", kind: "script" };
-    if (which("python")) return { cmd: "python", ext: "py", kind: "script" };
-    return null;
+    const py = findExec("python3") || findExec("python");
+    return py ? { cmd: py, ext: "py", kind: "script" } : null;
   }
   if (language === "javascript") {
     return { cmd: process.execPath, ext: "js", kind: "script" };
   }
   if (language === "java") {
-    if (which("javac") && which("java")) return { cmd: "java", ext: "java", kind: "java" };
-    return null;
+    return javaRuntime();
   }
   return null;
 }
@@ -136,7 +183,11 @@ async function runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb }) {
     if (rt.kind === "java") {
       const file = path.join(tmp, "Main.java");
       fs.writeFileSync(file, String(code ?? ""));
-      const compile = spawnSync("javac", [file], { cwd: tmp, encoding: "utf8", timeout: 20000 });
+      const compile = spawnSync(rt.compileCmd || "javac", [file], {
+        cwd: tmp,
+        encoding: "utf8",
+        timeout: 20000,
+      });
       if (compile.status !== 0) {
         return {
           status: STATUS.COMPILATION_ERROR,
@@ -149,7 +200,7 @@ async function runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb }) {
         };
       }
       return await execWithLimits(
-        "java",
+        rt.cmd,
         ["-cp", tmp, "Main"],
         stdin,
         timeLimitMs,
