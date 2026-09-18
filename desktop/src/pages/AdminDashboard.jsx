@@ -179,7 +179,11 @@ export default function AdminDashboard() {
     }
     setLoading(true);
     try {
-      await api.patch(`/admin/tests/${reschedule.id}`, rescheduleForm);
+      await api.patch(`/admin/tests/${reschedule.id}`, {
+        availableFrom: new Date(rescheduleForm.availableFrom).toISOString(),
+        availableUntil: new Date(rescheduleForm.availableUntil).toISOString(),
+        durationMinutes: rescheduleForm.durationMinutes,
+      });
       toast.success("Test schedule updated");
       setReschedule(null);
       load();

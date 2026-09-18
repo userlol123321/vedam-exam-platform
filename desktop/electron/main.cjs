@@ -39,6 +39,9 @@ function createWindow() {
   mainWindow.on("close", () => {
     mainWindow = null;
   });
+
+  // Never let a renderer beforeunload handler block closing/quitting the app.
+  mainWindow.webContents.on("will-prevent-unload", (event) => event.preventDefault());
 }
 
 // ===== ANTI-CHEATING: IPC HANDLERS =====

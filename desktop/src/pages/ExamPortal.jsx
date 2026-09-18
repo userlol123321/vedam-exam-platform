@@ -1,9 +1,18 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { toast } from "react-hot-toast";
-import Editor from "@monaco-editor/react";
+import Editor, { loader } from "@monaco-editor/react";
+import * as monaco from "monaco-editor";
+import editorWorker from "monaco-editor/editor/editor.worker?worker";
 import { api } from "../services/api";
 import { decrypt, decryptJson } from "../services/crypto";
+
+// Bundle Monaco with the app instead of fetching it from a CDN, so the
+// editor loads instantly and works offline in the packaged app.
+self.MonacoEnvironment = {
+  getWorker: () => new editorWorker(),
+};
+loader.config({ monaco });
 import {
   storeData,
   getData,
@@ -44,6 +53,17 @@ export default function ExamPortal() {
   const examKeyRef = useRef(null);
   const startedAtRef = useRef(null);
   const runtimeKeyRef = useRef(null);
+  const phaseRef = useRef(phase);
+
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
+
+  // Remove the beforeunload guard when leaving the exam screen so the app
+  // can always be closed/quitted normally.
+  useEffect(() => () => {
+    window.onbeforeunload = null;
+  }, []);
 
   // ===== Phase 1: start test =====
   async function startExam() {
@@ -134,6 +154,7 @@ export default function ExamPortal() {
   }, []);
 
   const handleBeforeUnload = useCallback((e) => {
+    if (phaseRef.current !== "running") return;
     const draft = {
       answers,
       tabSwitches,
@@ -273,6 +294,7 @@ export default function ExamPortal() {
     } catch {}
 
     document.body.classList.remove("exam-active", "no-select");
+    window.onbeforeunload = null;
     clearInterval(timerRef.current);
 
     try {

@@ -121,14 +121,21 @@ export default function TestBuilder() {
     if (!test.title.trim() || !test.batchId || !test.availableFrom || !test.availableUntil) {
       return toast.error("Fill title, batch, start & end time");
     }
+    // Send explicit UTC instants so the wall-clock time the admin picked is
+    // preserved regardless of the server's timezone (Render runs in UTC).
+    const payload = {
+      ...test,
+      availableFrom: new Date(test.availableFrom).toISOString(),
+      availableUntil: new Date(test.availableUntil).toISOString(),
+    };
     setLoading(true);
     try {
       if (isNew) {
-        const res = await api.post("/admin/tests", test);
+        const res = await api.post("/admin/tests", payload);
         toast.success("Test created. Add questions next.");
         navigate(`/admin/test/${res.data.test.id}`);
       } else {
-        await api.patch(`/admin/tests/${testId}`, test);
+        await api.patch(`/admin/tests/${testId}`, payload);
         toast.success("Test updated");
       }
     } catch (err) {
@@ -194,9 +201,11 @@ export default function TestBuilder() {
   async function saveCoding() {
     if (!codingDraft.questionText.trim()) return toast.error("Enter question text");
     if (!codingDraft.language) return toast.error("Select a language");
-    const hiddenFilled = codingDraft.hiddenTestCases.filter((t) => t.input !== "" && t.output !== "");
-    if (hiddenFilled.length === 0) return toast.error("At least one hidden test case required");
-    const sampleFilled = codingDraft.sampleTestCases.filter((t) => t.input !== "" && t.output !== "");
+    // Hidden cases only need an expected output to grade against — the input
+    // may legitimately be empty (e.g. "print hello world" questions).
+    const hiddenFilled = codingDraft.hiddenTestCases.filter((t) => t.output.trim() !== "");
+    if (hiddenFilled.length === 0) return toast.error("At least one hidden test case with an expected output required");
+    const sampleFilled = codingDraft.sampleTestCases.filter((t) => t.output.trim() !== "");
 
     const bannedList = codingDraft.bannedPatterns
       .split("\n")
