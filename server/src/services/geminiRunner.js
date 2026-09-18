@@ -13,7 +13,7 @@
 
 const API_BASE = (process.env.GEMINI_API_BASE || "https://generativelanguage.googleapis.com/v1beta").replace(/\/$/, "");
 const API_KEY = process.env.GEMINI_API_KEY || "";
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 const REQUEST_TIMEOUT_MS = 80000; // 30s sandbox cap + model turn + overhead
 
 const STATUS = {
