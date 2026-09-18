@@ -151,6 +151,7 @@ export default function TestBuilder() {
     const filled = mcqDraft.options.filter((o) => o.text.trim());
     if (filled.length < 2) return toast.error("Need at least 2 options");
     if (!mcqDraft.correctAnswer) return toast.error("Select the correct answer");
+    if (isNew) return toast.error("Save test settings first, then add questions");
     try {
       await api.post(`/admin/tests/${testId}/questions`, {
         type: "mcq",
@@ -202,6 +203,7 @@ export default function TestBuilder() {
       .map((s) => s.trim())
       .filter(Boolean);
 
+    if (isNew) return toast.error("Save test settings first, then add questions");
     try {
       await api.post(`/admin/tests/${testId}/questions`, {
         type: "coding",
@@ -356,7 +358,13 @@ export default function TestBuilder() {
         {/* Questions */}
         <div className="flex-between mb-16">
           <h3 style={styles.sectionTitle}>Questions ({questions.length})</h3>
-          <button className="btn btn-primary" onClick={() => setShowQuestion((v) => !v)}>
+          <button
+            className="btn btn-primary"
+            onClick={() => {
+              if (isNew) return toast.error("Save test settings first, then add questions");
+              setShowQuestion((v) => !v);
+            }}
+          >
             {showQuestion ? "Cancel" : "+ Add Question"}
           </button>
         </div>
@@ -540,20 +548,22 @@ export default function TestBuilder() {
                 <div className="grid-2">
                   <div className="form-row">
                     <label className="label">Complexity requirement (shown to student)</label>
-                    <input
+                    <textarea
                       className="input"
+                      rows={2}
                       value={codingDraft.complexityRequirement}
                       onChange={(e) => setCodingDraft({ ...codingDraft, complexityRequirement: e.target.value })}
-                      placeholder="e.g., O(n) time, O(1) space"
+                      placeholder={"e.g., O(n) time, O(1) space\nMust not be O(n^2)"}
                     />
                   </div>
                   <div className="form-row">
                     <label className="label">Input constraints (shown to student)</label>
-                    <input
+                    <textarea
                       className="input"
+                      rows={2}
                       value={codingDraft.inputConstraints}
                       onChange={(e) => setCodingDraft({ ...codingDraft, inputConstraints: e.target.value })}
-                      placeholder="e.g., 1 ≤ n ≤ 10^5"
+                      placeholder={"e.g., 1 ≤ n ≤ 10^5\n1 ≤ arr[i] ≤ 10^9"}
                     />
                   </div>
                 </div>

@@ -190,6 +190,20 @@ export default function AdminDashboard() {
     }
   }
 
+  async function deleteTest(t) {
+    if (!confirm(`Delete "${t.title}"?\nThis permanently removes the test, its questions, student submissions and results.`)) return;
+    setLoading(true);
+    try {
+      await api.delete(`/admin/tests/${t.id}`);
+      toast.success("Test deleted");
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || "Failed to delete test");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function testStatus(test) {
     const now = new Date();
     if (now < new Date(test.available_from)) return { label: "Scheduled", color: "#f59e0b" };
@@ -322,6 +336,12 @@ export default function AdminDashboard() {
                                 onClick={() => openReschedule(t)}
                               >
                                 Reschedule
+                              </button>{" "}
+                              <button
+                                className="btn btn-sm btn-danger"
+                                onClick={() => deleteTest(t)}
+                              >
+                                Delete
                               </button>
                             </td>
                           </tr>
