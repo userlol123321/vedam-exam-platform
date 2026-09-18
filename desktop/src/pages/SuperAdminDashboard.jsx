@@ -21,6 +21,9 @@ export default function SuperAdminDashboard() {
   const [selected, setSelected] = useState(null); // detail of an institution
   const [detail, setDetail] = useState(null);
   const [tab, setTab] = useState("overview");
+  const [removeTarget, setRemoveTarget] = useState(null); // institution pending deletion
+  const [removeInput, setRemoveInput] = useState("");
+  const [removing, setRemoving] = useState(false);
 
   useEffect(() => {
     loadAll();
@@ -74,22 +77,32 @@ export default function SuperAdminDashboard() {
     }
   }
 
-  async function removeInstitution(inst) {
-    const typed = prompt(
-      `Permanently DELETE "${inst.name}" and ALL of its data (${inst.studentCount} students, tests, results)?\n\nThis cannot be undone.\n\nType "DELETE" to confirm:`
-    );
-    if (typed !== "DELETE") {
-      toast.error("Removal cancelled");
-      return;
-    }
+  async function openRemoveConfirm(inst) {
+    setRemoveTarget(inst);
+    setRemoveInput("");
+  }
+
+  async function closeRemoveConfirm() {
+    if (removing) return;
+    setRemoveTarget(null);
+    setRemoveInput("");
+  }
+
+  async function confirmRemove() {
+    if (!removeTarget || removeInput !== "DELETE") return;
+    setRemoving(true);
     try {
-      await api.delete(`/super/institutions/${inst.id}`);
-      toast.success(`${inst.name} removed`);
+      await api.delete(`/super/institutions/${removeTarget.id}`);
+      toast.success(`${removeTarget.name} removed`);
       setSelected(null);
       setDetail(null);
+      setRemoveTarget(null);
+      setRemoveInput("");
       loadAll();
     } catch (err) {
       toast.error(err.response?.data?.error || "Removal failed");
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -289,18 +302,24 @@ export default function SuperAdminDashboard() {
                       : <span style={badge(false)}>Deactivated</span>}
                   </td>
                   <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                    <button className="btn btn-sm btn-secondary" onClick={() => loadDetail(i.id)}>Manage</button>{" "}
-                    {i.active
-                      ? <button className="btn btn-sm btn-danger" onClick={() => toggleInstitution(i, false)}>Deactivate</button>
-                      : <button className="btn btn-sm btn-primary" onClick={() => toggleInstitution(i, true)}>Activate</button>}{" "}
-                    <button
-                      className="btn btn-sm btn-danger"
-                      style={{ background: "#fff", color: "#dc2626", border: "1px solid #fecaca" }}
-                      onClick={() => removeInstitution(i)}
-                      title="Permanently delete this college"
-                    >
-                      Remove
-                    </button>
+                    {i.code === "PLATFORM" ? (
+                      <span className="text-muted text-small">Platform owner — locked</span>
+                    ) : (
+                      <>
+                        <button className="btn btn-sm btn-secondary" onClick={() => loadDetail(i.id)}>Manage</button>{" "}
+                        {i.active
+                          ? <button className="btn btn-sm btn-danger" onClick={() => toggleInstitution(i, false)}>Deactivate</button>
+                          : <button className="btn btn-sm btn-primary" onClick={() => toggleInstitution(i, true)}>Activate</button>}{" "}
+                        <button
+                          className="btn btn-sm btn-danger"
+                          style={{ background: "#fff", color: "#dc2626", border: "1px solid #fecaca" }}
+                          onClick={() => openRemoveConfirm(i)}
+                          title="Permanently delete this college"
+                        >
+                          Remove
+                        </button>
+                      </>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -316,12 +335,57 @@ export default function SuperAdminDashboard() {
           institution admin can then log in. Deactivated users see "contact the service owner" when trying to log in.
         </p>
       </div>
+
+      {removeTarget && (
+        <div style={styles.modalOverlay} onClick={closeRemoveConfirm}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0, color: "#991b1b" }}>Delete institution</h3>
+            <p>
+              Permanently delete <b>{removeTarget.name}</b> ({removeTarget.studentCount} students, tests, results)?
+              This cannot be undone.
+            </p>
+            <p className="text-muted text-small" style={{ marginBottom: 8 }}>
+              Type <b>DELETE</b> to confirm:
+            </p>
+            <input
+              type="text"
+              value={removeInput}
+              onChange={(e) => setRemoveInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && removeInput === "DELETE") confirmRemove(); }}
+              autoFocus
+              style={styles.modalInput}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 }}>
+              <button className="btn btn-secondary" onClick={closeRemoveConfirm} disabled={removing}>Cancel</button>
+              <button
+                className="btn btn-danger"
+                onClick={confirmRemove}
+                disabled={removing || removeInput !== "DELETE"}
+              >
+                {removing ? "Deleting…" : "Delete permanently"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 const styles = {
   wrapper: { height: "100vh", display: "flex", flexDirection: "column" },
+  modalOverlay: {
+    position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)",
+    display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+  },
+  modal: {
+    background: "#fff", borderRadius: 12, padding: 24, width: 420, maxWidth: "90%",
+    boxShadow: "0 20px 50px rgba(0,0,0,0.3)",
+  },
+  modalInput: {
+    width: "100%", padding: "10px 12px", borderRadius: 8,
+    border: "1px solid #cbd5e1", fontSize: 14, boxSizing: "border-box",
+  },
   header: {
     display: "flex",
     justifyContent: "space-between",
