@@ -16,6 +16,10 @@ const API_KEY = process.env.GEMINI_API_KEY || "";
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 const REQUEST_TIMEOUT_MS = 80000; // 30s sandbox cap + model turn + overhead
 
+// Free-tier Gemini frequently returns 429 (rate limit) / 503 (high demand).
+// Retry transient failures so a numpy/pandas grading pass doesn't fail on a blip.
+const MAX_RETRIES = Number(process.env.GEMINI_API_RETRIES) || 3;
+
 const STATUS = {
   ACCEPTED: 3,
   RUNTIME_ERROR_OTHER: 12,
@@ -85,49 +89,77 @@ async function runGemini({ language, code, stdin, timeLimitMs, memoryLimitMb }) 
     return internalError(`Google Gemini only executes Python (got: ${language})`);
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let lastResult = null;
 
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      lastResult = await sendOnce({ code, stdin, controller });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!lastResult.retryable || attempt >= MAX_RETRIES) break;
+    await sleep((attempt + 1) * 1000); // backoff before the next attempt
+  }
+
+  return lastResult.judge;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendOnce({ code, stdin, controller }) {
+  let res;
   try {
-    let res;
-    try {
-      res = await fetch(`${API_BASE}/models/${MODEL}:generateContent?key=${encodeURIComponent(API_KEY)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: buildPrompt(code, stdin) }] }],
-          tools: [{ code_execution: {} }],
-          generationConfig: { temperature: 0 },
-        }),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      return internalError(err.name === "AbortError"
+    res = await fetch(`${API_BASE}/models/${MODEL}:generateContent?key=${encodeURIComponent(API_KEY)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: buildPrompt(code, stdin) }] }],
+        tools: [{ code_execution: {} }],
+        generationConfig: { temperature: 0 },
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    return {
+      retryable: err.name !== "AbortError",
+      judge: internalError(err.name === "AbortError"
         ? `${providerName()} request timed out after ${REQUEST_TIMEOUT_MS}ms`
-        : `${providerName()} network error: ${err.message}`);
-    }
+        : `${providerName()} network error: ${err.message}`),
+    };
+  }
 
-    const text = await res.text();
-    let data = {};
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch (e) {
-      data = { raw: text.slice(0, 300) };
-    }
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (e) {
+    data = { raw: text.slice(0, 300) };
+  }
 
-    if (!res.ok) {
-      const msg = String(data.error?.message || data.raw || `HTTP ${res.status}`).slice(0, 300);
-      return internalError(`${providerName()} error ${res.status}: ${msg}`);
-    }
+  if (!res.ok) {
+    const msg = String(data.error?.message || data.raw || `HTTP ${res.status}`).slice(0, 300);
+    return {
+      retryable: res.status === 429 || res.status === 500 || res.status === 503 || res.status >= 502,
+      judge: internalError(`${providerName()} error ${res.status}: ${msg}`),
+    };
+  }
 
-    const parts = (data.candidates?.[0]?.content?.parts || []).filter((p) =>
-      p.codeExecutionResult || p.executableCode
-    );
+  const parts = (data.candidates?.[0]?.content?.parts || []).filter((p) =>
+    p.codeExecutionResult || p.executableCode
+  );
 
-    // Prefer the sandbox execution result emitted by the tool.
-    const execResult = parts.find((p) => p.codeExecutionResult)?.codeExecutionResult;
-    if (execResult && execResult.outcome === "OUTCOME_OK") {
-      return {
+  // Prefer the sandbox execution result emitted by the tool.
+  const execResult = parts.find((p) => p.codeExecutionResult)?.codeExecutionResult;
+  if (execResult && execResult.outcome === "OUTCOME_OK") {
+    return {
+      retryable: false,
+      judge: {
         status: STATUS.ACCEPTED,
         statusDescription: "Accepted",
         stdout: String(execResult.output || ""),
@@ -135,10 +167,13 @@ async function runGemini({ language, code, stdin, timeLimitMs, memoryLimitMb }) 
         compileOutput: "",
         message: "",
         exitCode: 0,
-      };
-    }
-    if (execResult && execResult.outcome === "OUTCOME_FAILED") {
-      return {
+      },
+    };
+  }
+  if (execResult && execResult.outcome === "OUTCOME_FAILED") {
+    return {
+      retryable: false,
+      judge: {
         status: STATUS.RUNTIME_ERROR_OTHER,
         statusDescription: "Runtime Error",
         stdout: "",
@@ -146,13 +181,14 @@ async function runGemini({ language, code, stdin, timeLimitMs, memoryLimitMb }) 
         compileOutput: "",
         message: "",
         exitCode: 1,
-      };
-    }
-
-    return internalError(`${providerName()} did not execute the code (no sandbox result returned)`);
-  } finally {
-    clearTimeout(timer);
+      },
+    };
   }
+
+  return {
+    retryable: false,
+    judge: internalError(`${providerName()} did not execute the code (no sandbox result returned)`),
+  };
 }
 
 module.exports = { runGemini, configured, providerName, supports, shouldRetry, STATUS };
