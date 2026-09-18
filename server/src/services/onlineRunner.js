@@ -12,6 +12,28 @@ const API_BASE = process.env.ONLINE_COMPILER_BASE_URL || "https://api.onlinecomp
 const API_KEY = process.env.ONLINE_COMPILER_API_KEY || "";
 const REQUEST_TIMEOUT_MS = 45000; // service has a 30s execution cap + overhead
 
+// onlinecompiler.io allows only a small number of concurrent sync requests
+// (returns HTTP 429 beyond that). We queue in-process instead of erroring, so
+// a 200-student exam burst drains orderly instead of failing runs.
+const MAX_CONCURRENCY = Math.max(1, Number(process.env.ONLINE_COMPILER_CONCURRENCY) || 4);
+const MAX_RETRIES = Number(process.env.ONLINE_COMPILER_RETRIES) || 3;
+
+let activeRuns = 0;
+const waiters = [];
+async function acquire() {
+  if (activeRuns < MAX_CONCURRENCY) {
+    activeRuns += 1;
+    return;
+  }
+  await new Promise((resolve) => waiters.push(resolve));
+  activeRuns += 1;
+}
+function release() {
+  activeRuns -= 1;
+  const next = waiters.shift();
+  if (next) next();
+}
+
 // Judge0-compatible status ids so grading logic works unchanged.
 const STATUS = {
   ACCEPTED: 3,
@@ -78,51 +100,87 @@ async function runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb }) 
     return internalError(`No online compiler configured for language: ${language}`);
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let lastResult = null;
 
-  try {
-    let res;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
     try {
-      res = await fetch(`${API_BASE}/api/run-code-sync/`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: API_KEY,
-        },
-        body: JSON.stringify({
-          compiler,
-          code: String(code ?? ""),
-          input: String(stdin ?? ""),
-        }),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      if (err.name === "AbortError") {
-        return internalError(`${providerName()} request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+      await acquire();
+      try {
+        lastResult = await sendOnce({ compiler, code, stdin, controller });
+      } finally {
+        release();
       }
-      return internalError(`${providerName()} network error: ${err.message}`);
+    } finally {
+      clearTimeout(timer);
     }
 
-    const text = await res.text();
-    let data = {};
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch (e) {
-      data = { error: text.slice(0, 300) };
-    }
+    if (!lastResult.retryable || attempt >= MAX_RETRIES) break;
+    await sleep((attempt + 1) * 1000); // backoff before the next attempt
+  }
 
-    if (!res.ok) {
-      const msg = `${providerName()} HTTP ${res.status}: ${data.error || data.detail || text.slice(0, 300)}`;
-      return res.status === 400 ? internalError(msg) : internalError(msg);
-    }
+  return lastResult.judge;
+}
 
-    const exitOk = String(data.exit_code ?? "") === "0";
-    const out = String(data.output ?? "");
-    const errText = String(data.error ?? "") + " " + String(data.signal ?? "");
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-    if (exitOk && !errText.trim()) {
+async function sendOnce({ compiler, code, stdin, controller }) {
+  let res;
+  try {
+    res = await fetch(`${API_BASE}/api/run-code-sync/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: API_KEY,
+      },
+      body: JSON.stringify({
+        compiler,
+        code: String(code ?? ""),
+        input: String(stdin ?? ""),
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err.name === "AbortError") {
       return {
+        retryable: false,
+        judge: internalError(`${providerName()} request timed out after ${REQUEST_TIMEOUT_MS}ms`),
+      };
+    }
+    return {
+      retryable: true,
+      judge: internalError(`${providerName()} network error: ${err.message}`),
+    };
+  }
+
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (e) {
+    data = { error: text.slice(0, 300) };
+  }
+
+  if (!res.ok) {
+    const msg = `${providerName()} HTTP ${res.status}: ${data.error || data.detail || text.slice(0, 300)}`;
+    return {
+      retryable: res.status === 429 || res.status >= 500,
+      judge: internalError(msg),
+    };
+  }
+
+  const exitOk = String(data.exit_code ?? "") === "0";
+  const out = String(data.output ?? "");
+  const errText = String(data.error ?? "") + " " + String(data.signal ?? "");
+
+  if (exitOk && !errText.trim()) {
+    return {
+      retryable: false,
+      judge: {
         status: STATUS.ACCEPTED,
         statusDescription: "Accepted",
         stdout: out,
@@ -130,12 +188,15 @@ async function runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb }) 
         compileOutput: "",
         message: "",
         exitCode: 0,
-      };
-    }
+      },
+    };
+  }
 
-    const trimErr = errText.trim();
-    if (isTimeout(trimErr)) {
-      return {
+  const trimErr = errText.trim();
+  if (isTimeout(trimErr)) {
+    return {
+      retryable: false,
+      judge: {
         status: STATUS.TIME_LIMIT_EXCEEDED,
         statusDescription: "Time Limit Exceeded",
         stdout: out,
@@ -143,11 +204,14 @@ async function runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb }) 
         compileOutput: "",
         message: "Time limit exceeded",
         exitCode: 1,
-      };
-    }
+      },
+    };
+  }
 
-    if (isCompileError(trimErr)) {
-      return {
+  if (isCompileError(trimErr)) {
+    return {
+      retryable: false,
+      judge: {
         status: STATUS.COMPILATION_ERROR,
         statusDescription: "Compilation Error",
         stdout: "",
@@ -155,10 +219,13 @@ async function runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb }) 
         compileOutput: trimErr,
         message: "",
         exitCode: 1,
-      };
-    }
+      },
+    };
+  }
 
-    return {
+  return {
+    retryable: false,
+    judge: {
       status: STATUS.RUNTIME_ERROR_OTHER,
       statusDescription: "Runtime Error",
       stdout: out,
@@ -166,10 +233,8 @@ async function runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb }) 
       compileOutput: "",
       message: "",
       exitCode: 1,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
+    },
+  };
 }
 
 module.exports = { runOnline, configured, providerName, supports, STATUS };
