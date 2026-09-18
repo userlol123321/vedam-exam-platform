@@ -23,6 +23,7 @@ const LANGUAGE_IDS = {
 
 const { runLocal, runtimeFor } = require("./localRunner");
 const onlineRunner = require("./onlineRunner");
+const geminiRunner = require("./geminiRunner");
 
 const JUDGE0_MODE = process.env.JUDGE0_MODE || "CLOUD";
 const JUDGE0_BASE_URL = process.env.JUDGE0_BASE_URL || "http://localhost:2358";
@@ -102,74 +103,89 @@ async function executeCode({ language, code, stdin, timeLimitMs, memoryLimitMb }
   const lang = LANGUAGE_IDS[language];
   if (!lang) throw new Error(`Unsupported language: ${language}`);
 
+  let run;
+
   // Built-in judge: run code with local runtimes (no API key / Docker needed).
   if (JUDGE0_MODE === "LOCAL") {
-    return runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
+    run = await runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
   }
 
   // Local-first, online fallback for languages missing a local runtime.
-  if (JUDGE0_MODE === "HYBRID") {
+  else if (JUDGE0_MODE === "HYBRID") {
     if (runtimeFor(language)) {
-      return runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
+      run = await runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
+    } else if (onlineRunner.supports(language)) {
+      run = await onlineRunner.runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb });
+    } else {
+      const err = new Error(
+        `No runtime available for '${language}' (local or online) on this server`
+      );
+      err.status = 200;
+      throw err;
     }
-    if (onlineRunner.supports(language)) {
-      return onlineRunner.runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb });
-    }
-    const err = new Error(
-      `No runtime available for '${language}' (local or online) on this server`
-    );
-    err.status = 200;
-    throw err;
   }
 
   // Everything through the online compiler.
-  if (JUDGE0_MODE === "ONLINE") {
+  else if (JUDGE0_MODE === "ONLINE") {
     // onlinecompiler.io has no Node runtime, so Node keeps running locally —
     // it's just a child process of the server (zero extra footprint).
     if (language === "javascript") {
-      return runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
+      run = await runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
+    } else {
+      run = await onlineRunner.runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb });
     }
-    return onlineRunner.runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb });
   }
 
-  const cfg = getJudge0Config();
+  // SELF_HOSTED / CLOUD: Judge0-compatible API.
+  else {
+    const cfg = getJudge0Config();
 
-  const body = {
-    source_code: b64(code),
-    language_id: lang.id,
-    stdin: b64(stdin),
-    cpu_time_limit: (timeLimitMs || 2000) / 1000,
-    memory_limit: memoryLimitMb || 256,
-    base64_encoded: true,
-  };
+    const body = {
+      source_code: b64(code),
+      language_id: lang.id,
+      stdin: b64(stdin),
+      cpu_time_limit: (timeLimitMs || 2000) / 1000,
+      memory_limit: memoryLimitMb || 256,
+      base64_encoded: true,
+    };
 
-  const res = await fetch(
-    `${cfg.baseUrl}/submissions?base64_encoded=true&wait=true`,
-    {
-      method: "POST",
-      headers: cfg.headers,
-      body: JSON.stringify(body),
+    const res = await fetch(
+      `${cfg.baseUrl}/submissions?base64_encoded=true&wait=true`,
+      {
+        method: "POST",
+        headers: cfg.headers,
+        body: JSON.stringify(body),
+      }
+    );
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Judge0 error ${res.status}: ${text.slice(0, 300)}`);
     }
-  );
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Judge0 error ${res.status}: ${text.slice(0, 300)}`);
+    const data = await res.json();
+
+    run = {
+      status: data.status?.id,
+      statusDescription: data.status?.description,
+      stdout: unb64(data.stdout),
+      stderr: unb64(data.stderr),
+      compileOutput: unb64(data.compile_output),
+      message: data.message ? unb64(data.message) : "",
+      exitCode: data.exit_code,
+      time: data.time,
+      memory: data.memory,
+    };
   }
 
-  const data = await res.json();
+  // numpy/pandas & friends: when the primary Python runtime lacks the needed
+  // libraries, retry through Google Gemini's sandbox (free tier) for free.
+  if (language === "python" && geminiRunner.configured() && geminiRunner.shouldRetry(run)) {
+    const alt = await geminiRunner.runGemini({ language, code, stdin, timeLimitMs, memoryLimitMb });
+    if (alt) run = alt;
+  }
 
-  return {
-    status: data.status?.id,
-    statusDescription: data.status?.description,
-    stdout: unb64(data.stdout),
-    stderr: unb64(data.stderr),
-    compileOutput: unb64(data.compile_output),
-    message: data.message ? unb64(data.message) : "",
-    exitCode: data.exit_code,
-    time: data.time,
-    memory: data.memory,
-  };
+  return run;
 }
 
 /**
@@ -290,6 +306,10 @@ function judgeStatus() {
       ),
     };
   }
+  judge.gemini = {
+    provider: geminiRunner.providerName(),
+    configured: geminiRunner.configured(),
+  };
   return judge;
 }
 
