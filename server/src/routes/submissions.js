@@ -21,6 +21,17 @@ const codeRunLimiter = rateLimit({
   message: { error: "Too many code runs. Please wait a moment." },
 });
 
+// Student bring-your-own-key (BYOK): keys override the platform keys so each
+// student can pay for their own code-execution quota. Trimmed + length-capped.
+function cleanApiKeys(raw = {}) {
+  const keys = {};
+  const oc = String(raw?.onlineCompiler || "").trim().slice(0, 300);
+  const gm = String(raw?.gemini || "").trim().slice(0, 300);
+  if (oc) keys.onlineCompiler = oc;
+  if (gm) keys.gemini = gm;
+  return keys;
+}
+
 // GET /api/student/tests - available tests for my batch (only those currently available by time)
 router.get("/tests", requireAuth, requireStudent, async (req, res) => {
   try {
@@ -30,6 +41,7 @@ router.get("/tests", requireAuth, requireStudent, async (req, res) => {
               t.duration_minutes, t.allow_late_start, t.results_visibility, t.allow_rank_view,
               (SELECT COUNT(*) FROM questions q WHERE q.test_id = t.id) AS question_count,
               (SELECT COALESCE(MAX(q.marks), 0) FROM questions q WHERE q.test_id = t.id) AS total_marks,
+              EXISTS (SELECT 1 FROM questions q WHERE q.test_id = t.id AND q.type = 'coding') AS has_coding,
               s.id AS submission_id, s.score, s.is_graded,
               s.started_at, s.submitted_at
        FROM tests t
@@ -159,7 +171,9 @@ router.get("/results/:testId", requireAuth, requireStudent, async (req, res) => 
 // POST /api/student/tests/:id/start
 // Returns: decryption session info + encrypted question bundle (small payload for slow networks)
 // The encryption_key is delivered separately/on-demand to reduce offline risk.
+// POST /api/student/tests/:id/start
 router.post("/tests/:id/start", requireAuth, requireStudent, async (req, res) => {
+  const apiKeys = cleanApiKeys(req.body.apiKeys);
   try {
     const now = new Date();
     const testRes = await pool.query(
@@ -213,6 +227,17 @@ router.post("/tests/:id/start", requireAuth, requireStudent, async (req, res) =>
       `SELECT * FROM questions WHERE test_id = $1 ORDER BY order_index`,
       [req.params.id]
     );
+
+    // A coding exam requires the student's own execution API key
+    // (bring-your-own-key), so the student pays for their runs — the platform
+    // does not subsidize student code execution.
+    const hasCoding = qRes.rows.some((q) => q.type === "coding");
+    if (hasCoding && !apiKeys.onlineCompiler) {
+      return res.status(400).json({
+        error:
+          "This test has coding questions. Add your onlinecompiler.io API key in the exam app to start.",
+      });
+    }
 
     const key = test.encryption_key;
 
@@ -288,7 +313,8 @@ router.post("/tests/:id/start", requireAuth, requireStudent, async (req, res) =>
 
 // POST /api/student/tests/:id/submit
 router.post("/tests/:id/submit", requireAuth, requireStudent, async (req, res) => {
-  const { answers, tabSwitches } = req.body;
+  const { answers, tabSwitches, apiKeys: rawKeys } = req.body;
+  const apiKeys = cleanApiKeys(rawKeys);
 
   // Basic payload sanity. Answers are graded server-side against DB truth, so
   // a crafted payload cannot inflate marks — but guard sizes anyway.
@@ -399,6 +425,7 @@ router.post("/tests/:id/submit", requireAuth, requireStudent, async (req, res) =
           memoryLimitMb: q.memory_limit_mb,
           bannedPatterns,
           markingMode: q.marking_mode,
+          apiKeys,
         });
 
         gd.earnedMarks = graded.earnedMarks;
@@ -458,7 +485,8 @@ router.post("/tests/:id/submit", requireAuth, requireStudent, async (req, res) =
 
 // POST /api/code/run - live "Run" during exam (sample cases only)
 router.post("/code/run", codeRunLimiter, requireAuth, requireStudent, async (req, res) => {
-  const { language, code, stdin, testId } = req.body;
+  const { language, code, stdin, testId, apiKeys: rawKeys } = req.body;
+  const apiKeys = cleanApiKeys(rawKeys);
   try {
     // Only allow running code while an exam for the student's batch is in progress.
     const now = new Date();
@@ -482,6 +510,7 @@ router.post("/code/run", codeRunLimiter, requireAuth, requireStudent, async (req
       stdin: stdinStr,
       timeLimitMs: 2000,
       memoryLimitMb: 256,
+      apiKeys,
     });
     res.json(run);
   } catch (err) {

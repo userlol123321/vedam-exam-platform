@@ -88,11 +88,15 @@ function isTimeout(text) {
  * Execute a single program against one stdin input using onlinecompiler.io.
  * Never throws for non-fatal provider issues — returns a Judge0-shaped object
  * so the grading pipeline in judge0.js works unchanged.
+ *
+ * `apiKey`: optional student-supplied key. When provided it overrides the
+ * platform key (bring-your-own-key), so each student can pay their own way.
  */
-async function runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb }) {
-  if (!configured()) {
+async function runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb, apiKey }) {
+  const key = String(apiKey || "").trim() || API_KEY;
+  if (!key) {
     return internalError(
-      `Online code runner (${providerName()}) is not configured: set ONLINE_COMPILER_API_KEY`
+      `Online code runner (${providerName()}) has no API key: add your onlinecompiler.io key in the exam app`
     );
   }
   const compiler = COMPILERS[language];
@@ -109,7 +113,7 @@ async function runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb }) 
     try {
       await acquire();
       try {
-        lastResult = await sendOnce({ compiler, code, stdin, controller });
+        lastResult = await sendOnce({ compiler, code, stdin, controller, apiKey: key });
       } finally {
         release();
       }
@@ -128,14 +132,14 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function sendOnce({ compiler, code, stdin, controller }) {
+async function sendOnce({ compiler, code, stdin, controller, apiKey }) {
   let res;
   try {
     res = await fetch(`${API_BASE}/api/run-code-sync/`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: API_KEY,
+        Authorization: apiKey,
       },
       body: JSON.stringify({
         compiler,

@@ -4,7 +4,7 @@ import { toast } from "react-hot-toast";
 import Editor, { loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
-import { api } from "../services/api";
+import { api, getStudentKeys, saveStudentKeys } from "../services/api";
 import { decrypt, decryptJson } from "../services/crypto";
 
 // Bundle Monaco with the app instead of fetching it from a CDN, so the
@@ -48,6 +48,34 @@ export default function ExamPortal() {
   const [submitResult, setSubmitResult] = useState(null);
   const [offline, setOffline] = useState(!navigator.onLine);
   const [decrypted, setDecrypted] = useState([]);
+  const [testHasCoding, setTestHasCoding] = useState(null);
+  const [keys, setKeys] = useState(() => getStudentKeys());
+  const [keyDraft, setKeyDraft] = useState(() => ({ ...getStudentKeys() }));
+  const [keysOpen, setKeysOpen] = useState(false);
+
+  // On mount: detect whether this test has coding questions (needs API keys)
+  // and hydrate the student's saved bring-your-own keys.
+  useEffect(() => {
+    api
+      .get("/student/tests")
+      .then((res) => {
+        const t = (res.data.tests || []).find((x) => String(x.id) === String(testId));
+        if (t) setTestHasCoding(Boolean(t.has_coding));
+      })
+      .catch(() => {});
+  }, [testId]);
+
+  function openKeysPanel() {
+    setKeyDraft({ ...getStudentKeys() });
+    setKeysOpen(true);
+  }
+
+  function saveKeysPanel() {
+    const saved = saveStudentKeys(keyDraft);
+    setKeys(saved);
+    setKeysOpen(false);
+    toast.success("Execution API keys saved");
+  }
 
   const timerRef = useRef(null);
   const examKeyRef = useRef(null);
@@ -69,7 +97,7 @@ export default function ExamPortal() {
   async function startExam() {
     setPhase("entering");
     try {
-      const res = await api.post(`/student/tests/${testId}/start`);
+      const res = await api.post(`/student/tests/${testId}/start`, { apiKeys: keys });
       const data = res.data;
 
       examKeyRef.current = data.encryptionKey;
@@ -246,6 +274,7 @@ export default function ExamPortal() {
             stdin: tc.input,
             testId,
             questionId: qid,
+            apiKeys: keys,
           });
           results.push({
             input: tc.input,
@@ -283,6 +312,7 @@ export default function ExamPortal() {
     const payload = {
       answers: answerList,
       tabSwitches,
+      apiKeys: keys,
     };
 
     // Exit exam mode before showing result (fullscreen off)
@@ -336,6 +366,8 @@ export default function ExamPortal() {
 
   if (phase === "intro") {
     const meta = testMetaRef || {};
+    const needsKeys = testHasCoding && !keys.onlineCompiler;
+    const showKeysForm = keysOpen || needsKeys;
     return (
       <div style={styles.centerPage}>
         <div className="card" style={{ maxWidth: 460, width: "100%" }}>
@@ -351,8 +383,64 @@ export default function ExamPortal() {
             <li>Tab-switching is logged</li>
             <li>Auto-submit happens when time runs out</li>
           </ul>
-          <button className="btn btn-primary" style={{ width: "100%" }} onClick={startExam}>
-            Start Exam
+
+          {testHasCoding && (
+            <div style={styles.keysBox}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                <b style={{ fontSize: 13 }}>Coding questions need an execution key</b>
+                {keys.onlineCompiler && (
+                  <button className="btn btn-sm btn-secondary" onClick={openKeysPanel}>
+                    Manage keys
+                  </button>
+                )}
+              </div>
+              {!needsKeys && keys.onlineCompiler && (
+                <p className="text-small" style={{ color: "#065f46", margin: "6px 0 0" }}>
+                  ✓ onlinecompiler.io key set{keys.gemini ? " · Gemini key set" : " (Gemini optional — needed for numpy/pandas)"}
+                </p>
+              )}
+              {showKeysForm && (
+                <div style={{ marginTop: 10 }}>
+                  <label className="text-muted text-small">onlinecompiler.io API key (your own free key — you pay for your runs)</label>
+                  <input
+                    type="password"
+                    value={keyDraft.onlineCompiler || ""}
+                    onChange={(e) => setKeyDraft((k) => ({ ...k, onlineCompiler: e.target.value }))}
+                    placeholder="https://api.onlinecompiler.io — create a free key"
+                    style={styles.keysInput}
+                  />
+                  <label className="text-muted text-small" style={{ display: "block", marginTop: 8 }}>
+                    Google Gemini API key (optional — only needed for numpy/pandas questions)
+                  </label>
+                  <input
+                    type="password"
+                    value={keyDraft.gemini || ""}
+                    onChange={(e) => setKeyDraft((k) => ({ ...k, gemini: e.target.value }))}
+                    placeholder="https://aistudio.google.com/apikey — free"
+                    style={styles.keysInput}
+                  />
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <button className="btn btn-sm btn-primary" onClick={saveKeysPanel} disabled={!keyDraft.onlineCompiler}>
+                      Save keys
+                    </button>
+                    {!needsKeys && (
+                      <button className="btn btn-sm btn-secondary" onClick={() => setKeysOpen(false)}>
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <button
+            className="btn btn-primary"
+            style={{ width: "100%" }}
+            onClick={startExam}
+            disabled={Boolean(needsKeys)}
+          >
+            {needsKeys ? "Add execution API key above to start" : "Start Exam"}
           </button>
           <button
             className="btn btn-secondary"
@@ -695,6 +783,22 @@ const styles = {
     color: "#475569",
     fontSize: 13,
     lineHeight: 1.8,
+  },
+  keysBox: {
+    border: "1px solid #fecaca",
+    background: "#fff7ed",
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+  },
+  keysInput: {
+    width: "100%",
+    padding: "9px 10px",
+    borderRadius: 8,
+    border: "1px solid #cbd5e1",
+    fontSize: 13,
+    marginTop: 4,
+    boxSizing: "border-box",
   },
   examShell: {
     height: "100vh",

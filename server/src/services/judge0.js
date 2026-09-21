@@ -98,8 +98,12 @@ function unb64(b) {
  *            onlinecompiler.io (only TypeScript/Deno), so Node runs locally —
  *            it's just a child process of the server, zero extra footprint.
  *  - SELF_HOSTED / CLOUD: Judge0-compatible API
+ *
+ * `apiKeys` (optional): student-provided bring-your-own-key overrides,
+ * e.g. `{ onlineCompiler: "...", gemini: "..." }`. Absent or empty = use the
+ * platform's configured keys.
  */
-async function executeCode({ language, code, stdin, timeLimitMs, memoryLimitMb }) {
+async function executeCode({ language, code, stdin, timeLimitMs, memoryLimitMb, apiKeys = {} }) {
   const lang = LANGUAGE_IDS[language];
   if (!lang) throw new Error(`Unsupported language: ${language}`);
 
@@ -115,7 +119,7 @@ async function executeCode({ language, code, stdin, timeLimitMs, memoryLimitMb }
     if (runtimeFor(language)) {
       run = await runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
     } else if (onlineRunner.supports(language)) {
-      run = await onlineRunner.runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb });
+      run = await onlineRunner.runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb, apiKey: apiKeys.onlineCompiler });
     } else {
       const err = new Error(
         `No runtime available for '${language}' (local or online) on this server`
@@ -132,7 +136,7 @@ async function executeCode({ language, code, stdin, timeLimitMs, memoryLimitMb }
     if (language === "javascript") {
       run = await runLocal({ language, code, stdin, timeLimitMs, memoryLimitMb });
     } else {
-      run = await onlineRunner.runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb });
+      run = await onlineRunner.runOnline({ language, code, stdin, timeLimitMs, memoryLimitMb, apiKey: apiKeys.onlineCompiler });
     }
   }
 
@@ -180,8 +184,8 @@ async function executeCode({ language, code, stdin, timeLimitMs, memoryLimitMb }
 
   // numpy/pandas & friends: when the primary Python runtime lacks the needed
   // libraries, retry through Google Gemini's sandbox (free tier) for free.
-  if (language === "python" && geminiRunner.configured() && geminiRunner.shouldRetry(run)) {
-    const alt = await geminiRunner.runGemini({ language, code, stdin, timeLimitMs, memoryLimitMb });
+  if (language === "python" && (geminiRunner.configured() || apiKeys.gemini) && geminiRunner.shouldRetry(run)) {
+    const alt = await geminiRunner.runGemini({ language, code, stdin, timeLimitMs, memoryLimitMb, apiKey: apiKeys.gemini });
     if (alt) run = alt;
   }
 
@@ -202,6 +206,7 @@ async function gradeCodingQuestion({
   memoryLimitMb,
   bannedPatterns,
   markingMode = "partial",
+  apiKeys = {},
 }) {
   const restrictionCheck = checkRestrictions(code, bannedPatterns);
 
@@ -237,6 +242,7 @@ async function gradeCodingQuestion({
         stdin: String(tc.input ?? ""),
         timeLimitMs,
         memoryLimitMb,
+        apiKeys,
       });
 
       result.runStatus = run.statusDescription || `Status ${run.status}`;

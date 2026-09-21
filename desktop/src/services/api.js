@@ -56,4 +56,29 @@ export async function checkServerHealth() {
   }
 }
 
+// Student bring-your-own-key (BYOK) storage. Keys stay on the student's own
+// machine and are sent with each code run/submit so the student pays for their
+// own execution quota. Never uploaded anywhere else.
+const KEYS_LS_KEY = "vedam_student_keys";
+
+export function getStudentKeys() {
+  try {
+    return JSON.parse(localStorage.getItem(KEYS_LS_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+export function saveStudentKeys(keys) {
+  const clean = {};
+  if (keys.onlineCompiler) clean.onlineCompiler = String(keys.onlineCompiler).trim();
+  if (keys.gemini) clean.gemini = String(keys.gemini).trim();
+  localStorage.setItem(KEYS_LS_KEY, JSON.stringify(clean));
+  return clean;
+}
+
+export function clearStudentKeys() {
+  localStorage.removeItem(KEYS_LS_KEY);
+}
+
 export { API_BASE };

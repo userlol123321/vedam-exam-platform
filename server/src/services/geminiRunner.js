@@ -80,10 +80,14 @@ function buildPrompt(code, stdin) {
 /**
  * Execute a single Python program via the Gemini code execution tool.
  * Returns a Judge0-shaped object so the grading pipeline works unchanged.
+ *
+ * `apiKey`: optional student-supplied key, overrides the platform key
+ * (bring-your-own-key) so students can run numpy/pandas with their own quota.
  */
-async function runGemini({ language, code, stdin, timeLimitMs, memoryLimitMb }) {
-  if (!configured()) {
-    return internalError("Google Gemini runner is not configured: set GEMINI_API_KEY");
+async function runGemini({ language, code, stdin, timeLimitMs, memoryLimitMb, apiKey }) {
+  const key = String(apiKey || "").trim() || API_KEY;
+  if (!key) {
+    return internalError("Google Gemini runner has no API key: add your Gemini key in the exam app");
   }
   if (language !== "python") {
     return internalError(`Google Gemini only executes Python (got: ${language})`);
@@ -96,7 +100,7 @@ async function runGemini({ language, code, stdin, timeLimitMs, memoryLimitMb }) 
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
-      lastResult = await sendOnce({ code, stdin, controller });
+      lastResult = await sendOnce({ code, stdin, controller, apiKey: key });
     } finally {
       clearTimeout(timer);
     }
@@ -112,10 +116,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function sendOnce({ code, stdin, controller }) {
+async function sendOnce({ code, stdin, controller, apiKey }) {
   let res;
   try {
-    res = await fetch(`${API_BASE}/models/${MODEL}:generateContent?key=${encodeURIComponent(API_KEY)}`, {
+    res = await fetch(`${API_BASE}/models/${MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
