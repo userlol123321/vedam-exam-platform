@@ -49,6 +49,7 @@ export default function ExamPortal() {
   const [offline, setOffline] = useState(!navigator.onLine);
   const [decrypted, setDecrypted] = useState([]);
   const [testHasCoding, setTestHasCoding] = useState(null);
+  const [testHasMl, setTestHasMl] = useState(false);
   const [keys, setKeys] = useState(() => getStudentKeys());
   const [keyDraft, setKeyDraft] = useState(() => ({ ...getStudentKeys() }));
   const [keysOpen, setKeysOpen] = useState(false);
@@ -60,7 +61,10 @@ export default function ExamPortal() {
       .get("/student/tests")
       .then((res) => {
         const t = (res.data.tests || []).find((x) => String(x.id) === String(testId));
-        if (t) setTestHasCoding(Boolean(t.has_coding));
+        if (t) {
+          setTestHasCoding(Boolean(t.has_coding));
+          setTestHasMl(Boolean(t.has_ml));
+        }
       })
       .catch(() => {});
   }, [testId]);
@@ -266,6 +270,30 @@ export default function ExamPortal() {
     setIsRunning(true);
     try {
       const results = [];
+      if (q.ml_mode) {
+        // ML questions run against the admin's dataset (fed as stdin server-side).
+        const runRes = await api.post("/student/code/run", {
+          language: q.language || "python",
+          code,
+          stdin: "",
+          testId,
+          questionId: qid,
+          apiKeys: keys,
+          datasetUrl: q.dataset_url,
+        });
+        const stdout = runRes.data.stdout || "";
+        const parsed = (stdout.match(/-?\d+(\.\d+)?/g) || []).map(Number);
+        const acc = parsed.length ? parsed[parsed.length - 1] : null;
+        results.push({
+          input: `[ml dataset]`,
+          expected: `accuracy in ${q.accuracy_min}–${q.accuracy_max}`,
+          actual: stdout || runRes.data.stderr || runRes.data.compileOutput || "",
+          status: runRes.data.statusDescription || "Done",
+          code: acc !== null && acc >= q.accuracy_min && acc <= q.accuracy_max ? 0 : 1,
+          ml: true,
+          accuracy: acc,
+        });
+      } else {
       for (const tc of q.sample_test_cases) {
         try {
           const runRes = await api.post("/student/code/run", {
@@ -292,6 +320,7 @@ export default function ExamPortal() {
             code: -1,
           });
         }
+      }
       }
       setRunningOutput({ ...runningOutput, [qid]: results });
     } finally {
@@ -366,7 +395,7 @@ export default function ExamPortal() {
 
   if (phase === "intro") {
     const meta = testMetaRef || {};
-    const needsKeys = testHasCoding && !keys.onlineCompiler;
+    const needsKeys = testHasCoding && !keys.onlineCompiler && !(testHasMl && keys.gemini);
     const showKeysForm = keysOpen || needsKeys;
     return (
       <div style={styles.centerPage}>
@@ -387,7 +416,11 @@ export default function ExamPortal() {
           {testHasCoding && (
             <div style={styles.keysBox}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                <b style={{ fontSize: 13 }}>Coding questions need an execution key</b>
+                <b style={{ fontSize: 13 }}>
+                  {testHasMl
+                    ? "ML/coding questions need an execution key (onlinecompiler.io or Gemini)"
+                    : "Coding questions need an execution key (onlinecompiler.io)"}
+                </b>
                 {keys.onlineCompiler && (
                   <button className="btn btn-sm btn-secondary" onClick={openKeysPanel}>
                     Manage keys
@@ -615,9 +648,15 @@ export default function ExamPortal() {
           {currentQ && currentQ.type === "coding" && (
             <div key={currentQ.id} style={styles.codingPanel}>
               <div style={styles.qHeader}>
-                <span className="badge" style={{ background: "#e0e7ff", color: "#3730a3" }}>
-                  CODING · {LANGUAGE_MAP[currentQ.language] || currentQ.language}
-                </span>
+                {currentQ.ml_mode ? (
+                  <span className="badge" style={{ background: "#ede9fe", color: "#6d28d9" }}>
+                    ML · PYTHON · accuracy ±
+                  </span>
+                ) : (
+                  <span className="badge" style={{ background: "#e0e7ff", color: "#3730a3" }}>
+                    CODING · {LANGUAGE_MAP[currentQ.language] || currentQ.language}
+                  </span>
+                )}
                 <span className="text-muted text-small">
                   {currentQ.marks} marks · max{" "}
                   {(currentQ.time_limit_ms / 1000).toFixed(1)}s ·{" "}
@@ -626,6 +665,25 @@ export default function ExamPortal() {
               </div>
 
               <h3 style={styles.qText}>{currentQ.question_text}</h3>
+
+              {currentQ.ml_mode && (
+                <div style={{ ...styles.constraintsBox, background: "#f5f3ff", borderColor: "#ddd6fe" }}>
+                  <p>
+                    <b>ML question:</b> your Python code receives the dataset on stdin (e.g.
+                    via <code>sys.stdin.read()</code> / <code>pd.read_csv(io.StringIO(...))</code>).
+                    Train a model, evaluate it, and <b>print the accuracy</b> — you pass if it lands
+                    within <b>{currentQ.accuracy_min} – {currentQ.accuracy_max}</b>.
+                  </p>
+                  {currentQ.dataset_url && (
+                    <p style={{ wordBreak: "break-all" }}>
+                      <b>Dataset:</b>{" "}
+                      <a href={currentQ.dataset_url} target="_blank" rel="noreferrer" style={{ color: "#6d28d9" }}>
+                        {currentQ.dataset_url}
+                      </a>
+                    </p>
+                  )}
+                </div>
+              )}
 
               {(currentQ.complexity_requirement || currentQ.input_constraints) && (
                 <div style={styles.constraintsBox}>
@@ -648,7 +706,7 @@ export default function ExamPortal() {
               )}
 
               {/* Sample cases */}
-              {currentQ.sample_test_cases?.length > 0 && (
+              {!currentQ.ml_mode && currentQ.sample_test_cases?.length > 0 && (
                 <div style={styles.samplesBox}>
                   <b className="text-small">Sample test cases:</b>
                   {currentQ.sample_test_cases.map((tc, i) => (

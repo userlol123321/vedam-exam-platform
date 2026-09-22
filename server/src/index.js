@@ -4,7 +4,7 @@ const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 
-const { pool } = require("./config/database");
+const { pool, migrateSchema } = require("./config/database");
 const { judgeStatus } = require("./services/judge0");
 const authRoutes = require("./routes/auth");
 const studentAdminRoutes = require("./routes/students");
@@ -86,3 +86,8 @@ app.listen(PORT, () => {
   console.log(`  Mode: ${process.env.NODE_ENV || "development"}`);
   console.log(`  Judge0 mode: ${process.env.JUDGE0_MODE || "CLOUD"}`);
 });
+
+// Apply idempotent schema migrations (safe on every boot, incl. Neon).
+migrateSchema().then(() => {
+  console.log("✓ Database migrations applied");
+}).catch((err) => console.error("✗ Migration failed:", err.message));

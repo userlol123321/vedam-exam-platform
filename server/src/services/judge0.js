@@ -24,6 +24,7 @@ const LANGUAGE_IDS = {
 const { runLocal, runtimeFor } = require("./localRunner");
 const onlineRunner = require("./onlineRunner");
 const geminiRunner = require("./geminiRunner");
+const { fetchDataset } = require("./datasetFetcher");
 
 const JUDGE0_MODE = process.env.JUDGE0_MODE || "CLOUD";
 const JUDGE0_BASE_URL = process.env.JUDGE0_BASE_URL || "http://localhost:2358";
@@ -278,6 +279,99 @@ async function gradeCodingQuestion({
   return { earnedMarks, totalWeight, caseResults };
 }
 
+// Parse a numeric accuracy value out of program stdout. Accepts plain floats
+// (0.94 / 94 / "Accuracy: 94.3%").
+function parseAccuracy(stdout) {
+  const text = String(stdout || "");
+  const matches = text.match(/-?\d+(\.\d+)?/g) || [];
+  if (matches.length === 0) return null;
+  const values = matches.map(Number);
+  return { rawNumbers: values, mean: values.reduce((a, b) => a + b, 0) / values.length };
+}
+
+// Grade a Machine-Learning accuracy question. The admin supplies a dataset URL
+// and an acceptable accuracy range; the student's code reads the dataset from
+// stdin, trains/evaluates, and prints an accuracy value. Correct if the printed
+// accuracy lands within [accuracyMin, accuracyMax].
+async function gradeMLQuestion({
+  code,
+  datasetUrl,
+  accuracyMin,
+  accuracyMax,
+  timeLimitMs,
+  memoryLimitMb,
+  bannedPatterns,
+  markingMode = "all_or_nothing",
+  apiKeys = {},
+}) {
+  const restrictionCheck = checkRestrictions(code, bannedPatterns);
+  if (restrictionCheck.violation) {
+    return {
+      earnedMarks: 0,
+      totalWeight: 1,
+      restrictionViolation: restrictionCheck.pattern,
+      caseResults: [{ index: 0, passed: false, runStatus: "restriction_violation" }],
+    };
+  }
+
+  let dataset;
+  try {
+    ({ content: dataset } = await fetchDataset(datasetUrl));
+  } catch (err) {
+    return {
+      earnedMarks: 0,
+      totalWeight: 1,
+      caseResults: [{
+        index: 0,
+        passed: false,
+        runStatus: "dataset_error",
+        error: err.message,
+      }],
+    };
+  }
+
+  const caseResults = [];
+  let earnedMarks = 0;
+  let result = { index: 0, passed: false, weight: 1 };
+
+  try {
+    const run = await executeCode({
+      language: "python",
+      code,
+      stdin: dataset,
+      timeLimitMs,
+      memoryLimitMb,
+      apiKeys,
+    });
+
+    result.runStatus = run.statusDescription || `Status ${run.status}`;
+    if (run.status === JUDGE0_STATUS.ACCEPTED) {
+      const parsed = parseAccuracy(run.stdout);
+      const within = parsed && parsed.rawNumbers.some(
+        (v) => v >= Number(accuracyMin) && v <= Number(accuracyMax)
+      );
+      result.passed = !!within;
+      result.accuracy = parsed ? parsed.rawNumbers[parsed.rawNumbers.length - 1] : null;
+      result.stdoutPreview = String(run.stdout || "").slice(0, 400);
+      if (within) earnedMarks += 1;
+    } else {
+      result.error = run.stderr || run.compileOutput || run.message || "";
+    }
+  } catch (err) {
+    result.error = err.message;
+    result.runStatus = "judge_error";
+  }
+
+  caseResults.push(result);
+
+  const allPassed = result.passed;
+  const totalWeight = 1;
+  if (markingMode === "all_or_nothing") {
+    return { earnedMarks: allPassed ? totalWeight : 0, totalWeight, caseResults };
+  }
+  return { earnedMarks, totalWeight, caseResults };
+}
+
 /**
  * Mode-aware capability report for /health.
  */
@@ -325,6 +419,7 @@ module.exports = {
   executeCode,
   checkRestrictions,
   gradeCodingQuestion,
+  gradeMLQuestion,
   normalizeOutput,
   outputsMatch,
   judgeStatus,

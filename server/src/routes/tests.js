@@ -127,7 +127,8 @@ router.get("/:id", requireAuth, requireAdmin, async (req, res) => {
       `SELECT id, type, question_text, options, correct_answer, marks, negative_marks,
               language, starter_code, complexity_requirement, input_constraints,
               banned_patterns, restrict_msg, time_limit_ms, memory_limit_mb,
-              sample_test_cases, hidden_test_cases, marking_mode, order_index
+              sample_test_cases, hidden_test_cases, marking_mode, order_index,
+              ml_mode, dataset_url, accuracy_min, accuracy_max
        FROM questions WHERE test_id = $1 ORDER BY order_index`,
       [req.params.id]
     );
@@ -273,11 +274,38 @@ router.post("/:id/questions", requireAuth, requireAdmin, async (req, res) => {
         weights = [],
         markingMode = "partial",
         marks = 1,
+        mlMode = false,
+        datasetUrl = "",
+        accuracyMin = null,
+        accuracyMax = null,
       } = data;
 
-      if (!questionText || !language || hiddenTestCases.length === 0) {
+      if (!questionText || !language) {
         return res.status(400).json({
-          error: "questionText, language, and at least one hiddenTestCase required",
+          error: "questionText and language required",
+        });
+      }
+
+      const isMl = Boolean(mlMode) || Boolean(datasetUrl);
+      if (isMl) {
+        if (language !== "python") {
+          return res.status(400).json({ error: "ML questions must use Python" });
+        }
+        if (!datasetUrl) {
+          return res.status(400).json({ error: "datasetUrl required for ML questions" });
+        }
+        if (datasetUrl.startsWith("http://")) {
+          return res.status(400).json({ error: "Dataset URL must use https" });
+        }
+        if (accuracyMin === null || accuracyMax === null) {
+          return res.status(400).json({ error: "accuracyMin and accuracyMax required for ML questions" });
+        }
+        if (Number(accuracyMax) < Number(accuracyMin)) {
+          return res.status(400).json({ error: "accuracyMax must be >= accuracyMin" });
+        }
+      } else if (hiddenTestCases.length === 0) {
+        return res.status(400).json({
+          error: "at least one hiddenTestCase required unless ML question",
         });
       }
 
@@ -306,8 +334,10 @@ router.post("/:id/questions", requireAuth, requireAdmin, async (req, res) => {
         `INSERT INTO questions
           (test_id, type, question_text, language, starter_code, complexity_requirement,
            input_constraints, banned_patterns, restrict_msg, time_limit_ms, memory_limit_mb,
-           sample_test_cases, hidden_test_cases, marking_mode, marks, order_index)
-         VALUES ($1, 'coding', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           sample_test_cases, hidden_test_cases, marking_mode, marks, order_index,
+           ml_mode, dataset_url, accuracy_min, accuracy_max)
+         VALUES ($1, 'coding', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                 $16, $17, $18, $19)
          RETURNING id, type, marks`,
         [
           req.params.id,
@@ -325,6 +355,10 @@ router.post("/:id/questions", requireAuth, requireAdmin, async (req, res) => {
           markingMode,
           marksNum,
           orderResult.rows[0].next_order,
+          Boolean(isMl),
+          isMl ? String(datasetUrl).trim() : null,
+          isMl && accuracyMin !== null ? Number(accuracyMin) : null,
+          isMl && accuracyMax !== null ? Number(accuracyMax) : null,
         ]
       );
 

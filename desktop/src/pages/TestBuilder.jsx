@@ -55,6 +55,10 @@ export default function TestBuilder() {
     sampleTestCases: [{ input: "", output: "" }],
     hiddenTestCases: [{ input: "", output: "", weight: 1 }],
     markingMode: "partial",
+    mlMode: false,
+    datasetUrl: "",
+    accuracyMin: "",
+    accuracyMax: "",
   });
 
   useEffect(() => {
@@ -201,12 +205,25 @@ export default function TestBuilder() {
   async function saveCoding() {
     if (!codingDraft.questionText.trim()) return toast.error("Enter question text");
     if (!codingDraft.language) return toast.error("Select a language");
-    // Hidden cases only need an expected output to grade against — the input
-    // may legitimately be empty (e.g. "print hello world" questions).
-    const hiddenFilled = codingDraft.hiddenTestCases.filter((t) => t.output.trim() !== "");
-    if (hiddenFilled.length === 0) return toast.error("At least one hidden test case with an expected output required");
-    const sampleFilled = codingDraft.sampleTestCases.filter((t) => t.output.trim() !== "");
 
+    const mlOn = Boolean(codingDraft.mlMode);
+    if (mlOn) {
+      if (!codingDraft.datasetUrl.trim()) return toast.error("Enter the dataset URL for the ML question");
+      if (codingDraft.datasetUrl.trim().startsWith("http://"))
+        return toast.error("Dataset URL must start with https");
+      if (codingDraft.accuracyMin === "" || codingDraft.accuracyMax === "")
+        return toast.error("Enter both accuracy min and max for the ML question");
+      if (Number(codingDraft.accuracyMax) < Number(codingDraft.accuracyMin))
+        return toast.error("Accuracy max must be >= accuracy min");
+    } else {
+      // Hidden cases only need an expected output to grade against — the input
+      // may legitimately be empty (e.g. "print hello world" questions).
+      const hiddenFilled = codingDraft.hiddenTestCases.filter((t) => t.output.trim() !== "");
+      if (hiddenFilled.length === 0) return toast.error("At least one hidden test case with an expected output required");
+    }
+
+    const sampleFilled = codingDraft.sampleTestCases.filter((t) => t.output.trim() !== "");
+    const hiddenFilledAll = codingDraft.hiddenTestCases.filter((t) => t.output.trim() !== "");
     const bannedList = codingDraft.bannedPatterns
       .split("\n")
       .map((s) => s.trim())
@@ -226,9 +243,13 @@ export default function TestBuilder() {
         timeLimitMs: Number(codingDraft.timeLimitMs) || 2000,
         memoryLimitMb: Number(codingDraft.memoryLimitMb) || 256,
         sampleTestCases: sampleFilled,
-        hiddenTestCases: hiddenFilled,
-        weights: hiddenFilled.map((t) => Number(t.weight) || 1),
+        hiddenTestCases: hiddenFilledAll,
+        weights: hiddenFilledAll.map((t) => Number(t.weight) || 1),
         markingMode: codingDraft.markingMode,
+        mlMode: mlOn,
+        datasetUrl: mlOn ? codingDraft.datasetUrl.trim() : "",
+        accuracyMin: mlOn ? Number(codingDraft.accuracyMin) : null,
+        accuracyMax: mlOn ? Number(codingDraft.accuracyMax) : null,
       });
       toast.success("Coding question added");
       setCodingDraft({
@@ -244,6 +265,10 @@ export default function TestBuilder() {
         sampleTestCases: [{ input: "", output: "" }],
         hiddenTestCases: [{ input: "", output: "", weight: 1 }],
         markingMode: "partial",
+        mlMode: false,
+        datasetUrl: "",
+        accuracyMin: "",
+        accuracyMax: "",
       });
       setShowQuestion(false);
       loadTest();
@@ -505,12 +530,93 @@ export default function TestBuilder() {
                     placeholder="e.g., Given an array of integers, find the maximum subarray sum. Must run in O(n) time."
                   />
                 </div>
+
+                {/* ML / accuracy toggle */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "10px 12px",
+                    borderRadius: 8,
+                    border: "1px solid #ddd",
+                    marginBottom: 16,
+                    background: codingDraft.mlMode ? "#eef2ff" : "#fff",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    id="mlModeChk"
+                    checked={codingDraft.mlMode}
+                    onChange={(e) =>
+                      setCodingDraft({
+                        ...codingDraft,
+                        mlMode: e.target.checked,
+                        language: e.target.checked ? "python" : codingDraft.language,
+                        markingMode: e.target.checked ? "all_or_nothing" : codingDraft.markingMode,
+                      })
+                    }
+                  />
+                  <label htmlFor="mlModeChk" style={{ margin: 0, cursor: "pointer" }}>
+                    <b>Machine Learning / accuracy question</b>
+                    <span className="text-muted text-small">
+                      {" "}— student's Python reads a dataset, prints an accuracy score; correct if it lands
+                      within your range
+                    </span>
+                  </label>
+                </div>
+
+                {codingDraft.mlMode && (
+                  <div style={{ border: "1px dashed #b8c2e8", background: "#f5f7ff", borderRadius: 8, padding: 14, marginBottom: 16 }}>
+                    <div className="grid-2">
+                      <div className="form-row">
+                        <label className="label">Dataset URL * (https, e.g. your GitHub raw CSV)</label>
+                        <input
+                          className="input"
+                          value={codingDraft.datasetUrl}
+                          onChange={(e) => setCodingDraft({ ...codingDraft, datasetUrl: e.target.value })}
+                          placeholder="https://raw.githubusercontent.com/you/repo/main/dataset.csv"
+                        />
+                        <p className="text-small text-muted mt-8">
+                          The dataset is passed to the student's code as stdin. Student prints the
+                          accuracy (e.g. <code>0.94</code> or <code>94</code>); placeholder matters —
+                          mind the range you set below.
+                        </p>
+                      </div>
+                      <div className="form-row">
+                        <label className="label">Accuracy range (pass marks if inside)</label>
+                        <div className="grid-2">
+                          <input
+                            className="input"
+                            type="number"
+                            step="any"
+                            placeholder="min, e.g. 0.85"
+                            value={codingDraft.accuracyMin}
+                            onChange={(e) => setCodingDraft({ ...codingDraft, accuracyMin: e.target.value })}
+                          />
+                          <input
+                            className="input"
+                            type="number"
+                            step="any"
+                            placeholder="max, e.g. 1.00"
+                            value={codingDraft.accuracyMax}
+                            onChange={(e) => setCodingDraft({ ...codingDraft, accuracyMax: e.target.value })}
+                          />
+                        </div>
+                        <p className="text-small text-muted mt-8">
+                          Use the same scale as the student's printed value (0–1 fractions or 0–100).
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <div className="grid-3">
                   <div className="form-row">
                     <label className="label">Language *</label>
                     <select
                       className="input"
                       value={codingDraft.language}
+                      disabled={codingDraft.mlMode}
                       onChange={(e) => setCodingDraft({ ...codingDraft, language: e.target.value })}
                     >
                       {langOptions.map((l) => (
@@ -612,20 +718,23 @@ export default function TestBuilder() {
                   />
                 </div>
 
-                <div className="form-row">
-                  <label className="label">Marking mode</label>
-                  <select
-                    className="input"
-                    style={{ maxWidth: 260 }}
-                    value={codingDraft.markingMode}
-                    onChange={(e) => setCodingDraft({ ...codingDraft, markingMode: e.target.value })}
-                  >
-                    <option value="partial">Partial credit (marks per passing test case)</option>
-                    <option value="all_or_nothing">All or nothing (must pass every case)</option>
-                  </select>
-                </div>
+                {!codingDraft.mlMode && (
+                  <div className="form-row">
+                    <label className="label">Marking mode</label>
+                    <select
+                      className="input"
+                      style={{ maxWidth: 260 }}
+                      value={codingDraft.markingMode}
+                      onChange={(e) => setCodingDraft({ ...codingDraft, markingMode: e.target.value })}
+                    >
+                      <option value="partial">Partial credit (marks per passing test case)</option>
+                      <option value="all_or_nothing">All or nothing (must pass every case)</option>
+                    </select>
+                  </div>
+                )}
 
                 {/* Sample test cases */}
+                {!codingDraft.mlMode && (
                 <div className="form-row">
                   <div className="flex-between mb-8">
                     <label className="label" style={{ marginBottom: 0 }}>
@@ -678,8 +787,10 @@ export default function TestBuilder() {
                     </div>
                   ))}
                 </div>
+                )}
 
                 {/* Hidden test cases with weights */}
+                {!codingDraft.mlMode && (
                 <div className="form-row">
                   <div className="flex-between mb-8">
                     <label className="label" style={{ marginBottom: 0 }}>
@@ -767,6 +878,7 @@ export default function TestBuilder() {
                     inputs with a tight time limit force the intended algorithm.
                   </p>
                 </div>
+                )}
 
                 <button className="btn btn-primary" onClick={saveCoding}>
                   Save Coding Question
@@ -805,16 +917,29 @@ export default function TestBuilder() {
                 <div key={q.id} style={styles.qRow}>
                   <div style={styles.qNum}>{i + 1}</div>
                   <div style={{ flex: 1 }}>
-                    <span className="badge" style={{ background: "#e0e7ff", color: "#3730a3" }}>
-                      CODING · {q.language}
-                    </span>{" "}
+                    {q.ml_mode ? (
+                      <span className="badge" style={{ background: "#ede9fe", color: "#6d28d9" }}>
+                        ML · {q.language} · accuracy ±
+                      </span>
+                    ) : (
+                      <span className="badge" style={{ background: "#e0e7ff", color: "#3730a3" }}>
+                        CODING · {q.language}
+                      </span>
+                    )}{" "}
                     <span style={styles.qTitle}>{q.question_text}</span>
+                    {q.ml_mode ? (
+                      <div className="text-small text-muted mt-8">
+                        Dataset: <span style={{ wordBreak: "break-all" }}>{q.dataset_url}</span> ·{" "}
+                        accuracy {q.accuracy_min}–{q.accuracy_max} · {q.marks} pts
+                      </div>
+                    ) : (
                     <div className="text-small text-muted mt-8">
                       {hiddenCount} hidden cases · {totalWeight} pts total ·{" "}
                       {(q.time_limit_ms / 1000).toFixed(1)}s · {q.memory_limit_mb}MB ·{" "}
                       {q.marking_mode === "partial" ? "partial" : "all-or-nothing"}
                       {q.banned_patterns?.length > 0 && ` · ⚠ ${q.banned_patterns.length} banned pattern(s)`}
                     </div>
+                    )}
                   </div>
                   <button className="btn btn-sm btn-danger" onClick={() => deleteQuestion(q.id)}>
                     ✕

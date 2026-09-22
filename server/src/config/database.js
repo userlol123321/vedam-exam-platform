@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS questions (
   hidden_test_cases TEXT,
   marking_mode VARCHAR(20) DEFAULT 'partial',
   order_index INTEGER DEFAULT 0,
+  ml_mode BOOLEAN DEFAULT FALSE,
+  dataset_url TEXT,
+  accuracy_min NUMERIC(6,3),
+  accuracy_max NUMERIC(6,3),
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -139,6 +143,24 @@ async function setupDatabase() {
     console.error("✗ Database setup failed:", err.message);
   } finally {
     await pool.end();
+  }
+}
+
+// Idempotent column additions for existing databases (e.g. Neon, where the
+// schema is only applied once via --setup). Safe to run on every boot.
+async function migrateSchema() {
+  const statements = [
+    `ALTER TABLE questions ADD COLUMN IF NOT EXISTS ml_mode BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE questions ADD COLUMN IF NOT EXISTS dataset_url TEXT`,
+    `ALTER TABLE questions ADD COLUMN IF NOT EXISTS accuracy_min NUMERIC(6,3)`,
+    `ALTER TABLE questions ADD COLUMN IF NOT EXISTS accuracy_max NUMERIC(6,3)`,
+  ];
+  for (const sql of statements) {
+    try {
+      await pool.query(sql);
+    } catch (err) {
+      console.error("Migration step failed:", err.message);
+    }
   }
 }
 
@@ -203,4 +225,4 @@ async function seedDatabase() {
 if (isSetupMode) setupDatabase();
 else if (isSeedMode) seedDatabase();
 
-module.exports = { pool };
+module.exports = { pool, migrateSchema };

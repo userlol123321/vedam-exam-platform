@@ -3,7 +3,7 @@ const rateLimit = require("express-rate-limit");
 const { pool } = require("../config/database");
 const { requireAuth, requireStudent } = require("../middleware/auth");
 const encryption = require("../services/encryption");
-const { gradeCodingQuestion, executeCode } = require("../services/judge0");
+const { gradeCodingQuestion, gradeMLQuestion, executeCode } = require("../services/judge0");
 
 const router = express.Router();
 
@@ -42,6 +42,7 @@ router.get("/tests", requireAuth, requireStudent, async (req, res) => {
               (SELECT COUNT(*) FROM questions q WHERE q.test_id = t.id) AS question_count,
               (SELECT COALESCE(MAX(q.marks), 0) FROM questions q WHERE q.test_id = t.id) AS total_marks,
               EXISTS (SELECT 1 FROM questions q WHERE q.test_id = t.id AND q.type = 'coding') AS has_coding,
+              EXISTS (SELECT 1 FROM questions q WHERE q.test_id = t.id AND q.ml_mode = TRUE) AS has_ml,
               s.id AS submission_id, s.score, s.is_graded,
               s.started_at, s.submitted_at
        FROM tests t
@@ -230,13 +231,20 @@ router.post("/tests/:id/start", requireAuth, requireStudent, async (req, res) =>
 
     // A coding exam requires the student's own execution API key
     // (bring-your-own-key), so the student pays for their runs — the platform
-    // does not subsidize student code execution.
+    // does not subsidize student code execution. ML questions can run via the
+    // Gemini key since pandas/sklearn work best there.
     const hasCoding = qRes.rows.some((q) => q.type === "coding");
-    if (hasCoding && !apiKeys.onlineCompiler) {
-      return res.status(400).json({
-        error:
-          "This test has coding questions. Add your onlinecompiler.io API key in the exam app to start.",
-      });
+    const hasMl = qRes.rows.some((q) => q.ml_mode);
+    if (hasCoding) {
+      const needed = hasMl ? "onlinecompiler.io or Gemini" : "onlinecompiler.io";
+      const keyMissing = hasMl
+        ? !apiKeys.onlineCompiler && !apiKeys.gemini
+        : !apiKeys.onlineCompiler;
+      if (keyMissing) {
+        return res.status(400).json({
+          error: `This test has coding questions. Add your ${needed} API key in the exam app to start.`,
+        });
+      }
     }
 
     const key = test.encryption_key;
@@ -271,6 +279,10 @@ router.post("/tests/:id/start", requireAuth, requireStudent, async (req, res) =>
         marks: q.marks,
         marking_mode: q.marking_mode,
         order_index: q.order_index,
+        ml_mode: q.ml_mode,
+        accuracy_min: q.accuracy_min,
+        accuracy_max: q.accuracy_max,
+        dataset_url: q.ml_mode ? q.dataset_url : null,
       };
     });
 
@@ -411,37 +423,65 @@ router.post("/tests/:id/submit", requireAuth, requireStudent, async (req, res) =
           gd.isCorrect = false;
         }
       } else if (q.type === "coding") {
-        const hiddenCases = encryption.decryptJson(q.hidden_test_cases, key);
-        const weights = weightMap[q.id] || hiddenCases.map(() => 1);
         const bannedPatterns = q.banned_patterns || [];
         const code = String(answer?.code || "").slice(0, MAX_CODE_LENGTH);
 
-        const graded = await gradeCodingQuestion({
-          code,
-          language: q.language,
-          testCases: hiddenCases,
-          weights,
-          timeLimitMs: q.time_limit_ms,
-          memoryLimitMb: q.memory_limit_mb,
-          bannedPatterns,
-          markingMode: q.marking_mode,
-          apiKeys,
-        });
+        if (q.ml_mode) {
+          const graded = await gradeMLQuestion({
+            code,
+            datasetUrl: q.dataset_url,
+            accuracyMin: q.accuracy_min,
+            accuracyMax: q.accuracy_max,
+            timeLimitMs: q.time_limit_ms,
+            memoryLimitMb: q.memory_limit_mb,
+            bannedPatterns,
+            markingMode: q.marking_mode || "all_or_nothing",
+            apiKeys,
+          });
 
-        gd.earnedMarks = graded.earnedMarks;
-        gd.isCorrect = graded.earnedMarks > 0;
-        gd.case_results = graded.caseResults;
-        gd.restriction_violation = graded.restrictionViolation || null;
-        gd.details = code.slice(0, 500) || null;
+          gd.earnedMarks = graded.earnedMarks;
+          gd.isCorrect = graded.earnedMarks > 0;
+          gd.case_results = graded.caseResults;
+          gd.restriction_violation = graded.restrictionViolation || null;
+          gd.details = code.slice(0, 500) || null;
 
-        // Scale the weighted result to the question's configured marks, so a
-        // fully-correct coding answer is worth `marks` regardless of weight sum.
-        const qMarks = Number(q.marks) || 0;
-        const totalW = graded.totalWeight || 0;
-        gd.earnedMarks = totalW > 0
-          ? Number(((graded.earnedMarks / totalW) * qMarks).toFixed(2))
-          : 0;
-        totalMarks += qMarks;
+          const qMarks = Number(q.marks) || 0;
+          const totalW = graded.totalWeight || 1;
+          gd.earnedMarks = totalW > 0
+            ? Number((((graded.earnedMarks / totalW) * qMarks).toFixed(2)))
+            : 0;
+          totalMarks += qMarks;
+        } else {
+          const hiddenCases = encryption.decryptJson(q.hidden_test_cases, key);
+          const weights = weightMap[q.id] || hiddenCases.map(() => 1);
+
+          const graded = await gradeCodingQuestion({
+            code,
+            language: q.language,
+            testCases: hiddenCases,
+            weights,
+            timeLimitMs: q.time_limit_ms,
+            memoryLimitMb: q.memory_limit_mb,
+            bannedPatterns,
+            markingMode: q.marking_mode,
+            apiKeys,
+          });
+
+          gd.earnedMarks = graded.earnedMarks;
+          gd.isCorrect = graded.earnedMarks > 0;
+          gd.case_results = graded.caseResults;
+          gd.restriction_violation = graded.restrictionViolation || null;
+          gd.details = code.slice(0, 500) || null;
+
+          // Scale the weighted result to the question's configured marks, so a
+          // fully-correct coding answer is worth `marks` regardless of weight sum.
+          const qMarks = Number(q.marks) || 0;
+          const totalW = graded.totalWeight || 0;
+          gd.earnedMarks = totalW > 0
+            ? Number(((graded.earnedMarks / totalW) * qMarks).toFixed(2))
+            : 0;
+          totalMarks += qMarks;
+        }
       }
 
       totalScore += Number(gd.earnedMarks);
@@ -485,7 +525,7 @@ router.post("/tests/:id/submit", requireAuth, requireStudent, async (req, res) =
 
 // POST /api/code/run - live "Run" during exam (sample cases only)
 router.post("/code/run", codeRunLimiter, requireAuth, requireStudent, async (req, res) => {
-  const { language, code, stdin, testId, apiKeys: rawKeys } = req.body;
+  const { language, code, stdin, testId, apiKeys: rawKeys, datasetUrl } = req.body;
   const apiKeys = cleanApiKeys(rawKeys);
   try {
     // Only allow running code while an exam for the student's batch is in progress.
@@ -501,8 +541,19 @@ router.post("/code/run", codeRunLimiter, requireAuth, requireStudent, async (req
       return res.status(403).json({ error: "No active test for code execution" });
     }
 
+    // ML previews run against the admin-supplied dataset as stdin.
+    let stdinStr = String(stdin || "").slice(0, 4_000);
+    if (datasetUrl) {
+      const { fetchDataset } = require("../services/datasetFetcher");
+      try {
+        const ds = await fetchDataset(datasetUrl);
+        stdinStr = ds.content.slice(0, 5_000_000);
+      } catch (err) {
+        return res.status(400).json({ error: `Dataset fetch failed: ${err.message}` });
+      }
+    }
+
     const codeStr = String(code || "").slice(0, 100_000);
-    const stdinStr = String(stdin || "").slice(0, 4_000);
 
     const run = await executeCode({
       language,
