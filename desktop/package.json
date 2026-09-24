@@ -37,6 +37,7 @@
   "build": {
     "appId": "org.examplatform.app",
     "productName": "Exam Platform",
+    "afterPack": "scripts/after-pack.cjs",
     "directories": {
       "output": "dist-electron"
     },
